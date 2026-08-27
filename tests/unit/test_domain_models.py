@@ -76,16 +76,32 @@ def test_message_rejects_tool_call_on_user_role() -> None:
         Message(role=MessageRole.USER, tool_calls=(call,))
 
 
-def test_tool_message_requires_correlation_id() -> None:
+@pytest.mark.parametrize("tool_call_id", [None, "", "   ", "\t\n"])
+def test_tool_message_requires_non_blank_correlation_id(
+    tool_call_id: str | None,
+) -> None:
     with pytest.raises(DomainValidationError, match="tool_call_id"):
-        Message(role=MessageRole.TOOL, content="result")
+        Message(
+            role=MessageRole.TOOL,
+            content="result",
+            tool_call_id=tool_call_id,
+        )
 
 
-def test_failed_tool_result_requires_error_code() -> None:
+@pytest.mark.parametrize("error_code", [None, "", "   ", "\t\n"])
+def test_failed_tool_result_requires_non_blank_error_code(
+    error_code: str | None,
+) -> None:
     with pytest.raises(DomainValidationError, match="require an error_code"):
         ToolResult(
             call_id="call-1",
             tool_name="read_file",
             ok=False,
             content="missing",
+            error_code=error_code,
         )
+
+
+def test_message_rejects_plain_string_role_at_runtime() -> None:
+    with pytest.raises(DomainValidationError, match="MessageRole"):
+        Message(role="user", content="hello")  # type: ignore[arg-type]
