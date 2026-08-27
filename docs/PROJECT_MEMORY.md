@@ -110,4 +110,16 @@
 - 项目要求兼容 macOS、Linux、Windows，每个兼容点必须向用户说明。
 - 题目要求公开远程仓库，因此只有本地 Git 不够；用户选择 GitHub，但仓库尚未建立。
 - 用户尚不理解建议的视频演示任务，需要先用通俗例子说明，再共同冻结演示内容。
-- 在写第一行正式代码前初始化本地 Git；公开 GitHub 仓库需要尽快准备，但创建远程仓库前由用户确认账号状态。
+- 本地 Git 已初始化并按文档、代码分为两个提交；公开 GitHub 仓库需要尽快准备，但创建远程仓库前由用户确认账号状态和 Git 身份。
+
+## 10. 增量进度
+
+### I01：项目骨架、配置、领域值对象和 Factory
+
+- 状态：代码完成，等待用户结合代码完成讲解与复述。
+- 代码 commit：`ee057c1`。
+- 验证：27 个 pytest 测试通过；`python -m minicoder --check-config` 冒烟测试通过。
+- 生产代码规模：约 425 行 Python。
+- 已实现：`src` 打包布局、环境配置校验、API Key 输出保护、不可变消息/工具值对象、操作系统识别、ApplicationFactory、可测试 CLI。
+- 对应题库：I01-Q01 到 I01-Q12。
+- 下一增量：I02 ModelPort、DeepSeekChatAdapter 和 FakeModelAdapter。用户完成 I01 讲解互动后再进入。
