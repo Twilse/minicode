@@ -44,8 +44,8 @@
 - 语言：Python 3.11+。
 - 总体架构：六边形架构（Ports and Adapters），核心遵循依赖倒置；外部模型、CLI、文件系统、进程和事件输出均作为 Adapter。
 - 局部模式：Adapter/Gateway、Strategy、Observer、Command、Registry/Factory、责任链和显式有限状态机。只在解决真实问题时使用。
-- 模型接入：使用普通 `openai` Python 客户端连接 DeepSeek；官方模型参数为 `deepseek-v4-pro`，base URL 为 `https://api.deepseek.com`。
-- 环境变量：项目自行约定 `DEEPSEEK_API_KEY`、`DEEPSEEK_MODEL` 和 `DEEPSEEK_BASE_URL`。API Key 本身没有所谓“正确变量名”。
+- 模型接入：第一版通过普通 `openai` Python 客户端实现供应商中立的 OpenAI 兼容 Chat Completions Adapter。本地开发使用 DeepSeek V4 Pro，但用户可通过配置连接其他兼容模型。
+- 环境变量：统一使用 `MINICODER_API_KEY`、`MINICODER_BASE_URL` 和 `MINICODER_MODEL`，不在核心配置名或默认值中绑定 DeepSeek。DeepSeek 只作为 `.env.example` 示例。
 - 模型协议：第一版使用 Chat Completions 原生 function/tool calling。模型只提出工具调用，本地程序负责校验、执行并返回结果。
 - 核心工具：列目录、读文件、精确文本替换、写新文件、搜索文本、执行命令。
 - 代码组织：约 2000 到 3000 行正式代码，使用 `src` 布局、显式领域对象、手工依赖注入和可测试接口；避免异步、多进程和依赖注入框架。
@@ -60,7 +60,7 @@
 
 ### 亮点 B：分层上下文压缩
 
-永远保留系统规则、原始任务和最近交互；旧工具输出先做确定性截断，历史超过预算后再生成结构化摘要。重点展示长任务中如何控制上下文，同时避免忘记关键事实。
+永远保留系统规则、原始任务和最近交互；长工具输出采用“完整内容本地留存 + 开头 + 诊断窗口 + 结尾 + 按需分块读取”，历史超过预算后再生成结构化摘要。重点展示长任务中如何控制上下文，同时避免忘记关键事实。
 
 ### 亮点 C：验证后完成与失败修复
 
@@ -82,7 +82,8 @@
 |---|---|---|
 | 使用 Python | 已确认 | 用户熟悉；开发速度快，文件和进程 API 清楚 |
 | 使用 CLI | 已确认 | 用户接受；与 Coding Agent 场景贴合 |
-| 使用 DeepSeek V4 Pro | 已确认 | 官方模型参数为 `deepseek-v4-pro`，支持 tool calling |
+| 本地使用 DeepSeek V4 Pro | 已确认 | 仅作为开发和演示模型，不写死到产品配置 |
+| 配置支持多种模型 | 已确认 | 通用 `MINICODER_*` 变量可连接任意 OpenAI 兼容 tool calling 端点 |
 | 使用 Chat Completions | 初步确定 | V4-Pro 长期明确支持；Responses 支持状态近期有文档更新冲突 |
 | 使用六边形架构 | 已确定 | 隔离 Agent 核心与模型 SDK、CLI、OS，便于 Fake 测试和跨平台 |
 | 使用选择性设计模式 | 已确定 | 每种模式必须对应具体问题，不为模式而模式 |
@@ -106,7 +107,7 @@
 ## 9. 当前状态和待办
 
 - 用户熟悉 Python 和 Git，接受纯 CLI，每天可以投入较多时间。
-- 模型确定为 DeepSeek V4 Pro；不得在对话、代码或文档中写入真实 API Key。
+- 本地开发模型确定为 DeepSeek V4 Pro，产品配置必须保持供应商中立；不得在对话、代码或文档中写入真实 API Key。
 - 项目要求兼容 macOS、Linux、Windows，每个兼容点必须向用户说明。
 - 题目要求公开远程仓库，因此只有本地 Git 不够；用户选择 GitHub，但仓库尚未建立。
 - 视频演示方式已确认：使用一个已有失败测试的半成品待办事项 CLI，让 Agent 根据真实测试失败完成优先级功能、补充必要测试并修复到全部通过。
@@ -117,12 +118,12 @@
 ### I01：项目骨架、配置、领域值对象和 Factory
 
 - 状态：代码完成，等待用户结合代码完成讲解与复述。
-- 代码 commit：`ee057c1`。
-- 验证：27 个 pytest 测试通过；`python -m minicoder --check-config` 冒烟测试通过。
+- 代码 commits：`ee057c1`、供应商中立配置修正 `f5cafa1`。
+- 验证：30 个 pytest 测试通过；通用 `MINICODER_*` 配置的 `python -m minicoder --check-config` 冒烟测试通过。
 - 生产代码规模：约 425 行 Python。
 - 已实现：`src` 打包布局、环境配置校验、API Key 输出保护、不可变消息/工具值对象、操作系统识别、ApplicationFactory、可测试 CLI。
 - 对应题库：I01-Q01 到 I01-Q12。
-- 下一增量：I02 ModelPort、DeepSeekChatAdapter 和 FakeModelAdapter。用户完成 I01 讲解互动后再进入。
+- 下一增量：I02 ModelPort、OpenAICompatibleChatAdapter 和 FakeModelAdapter。用户完成 I01 讲解互动后再进入。
 
 ## 11. 已冻结的视频演示任务
 

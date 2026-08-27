@@ -63,10 +63,10 @@
 - 深入追问：为什么即使使用 strict schema，客户端仍应验证权限和业务约束？
 - 当前等级：L1。
 
-### P00-Q03：`deepseek-v4-pro`、API Key 和环境变量分别是什么？
+### P00-Q03：模型 ID、API Key 和通用环境变量分别是什么？
 
 - 对应内容：`PROJECT_MEMORY.md` 第 4 节。
-- 基础答案要点：`deepseek-v4-pro` 是请求中的模型 ID；API Key 是平台生成的秘密凭证；`DEEPSEEK_API_KEY` 是本项目自行约定的本地变量名。
+- 基础答案要点：模型 ID 由供应商定义；API Key 是供应商生成的秘密凭证；`MINICODER_API_KEY`、`MINICODER_BASE_URL`、`MINICODER_MODEL` 是本项目供应商中立的配置入口。DeepSeek 只是本地示例。
 - 深入追问：为什么不能把 API Key 写入 Config 默认值？
 - 当前等级：L0，待首次 Config 增量讲解。
 
@@ -103,8 +103,8 @@
 
 | 增量 | 内容 | Commit | 问题数 | 当前等级 |
 |---|---|---|---:|---:|
-| I01 | 项目骨架、Config、领域值对象、Factory | `ee057c1` | 12 | L1 |
-| I02 | ModelPort、DeepSeek/Fake Adapter | 未开始 | 0 | L0 |
+| I01 | 项目骨架、Config、领域值对象、Factory | `ee057c1`、`f5cafa1` | 13 | L1 |
+| I02 | ModelPort、兼容模型/Fake Adapter | 未开始 | 0 | L0 |
 | I03 | Tool Command、Registry、参数校验 | 未开始 | 0 | L0 |
 | I04 | 文件工具与路径安全 | 未开始 | 0 | L0 |
 | I05 | 跨平台进程工具与命令策略 | 未开始 | 0 | L0 |
@@ -191,7 +191,7 @@
 
 - 对应代码：`src/minicoder/bootstrap.py::ApplicationFactory`。
 - 对应测试：`tests/unit/test_bootstrap.py::test_factory_creates_validated_bootstrap_context`。
-- 基础答案要点：对象创建和依赖装配集中在系统边界，业务对象只通过构造参数接收依赖。后续 DeepSeek Adapter、Process Adapter 和 Policy 都由这里选择并连接。
+- 基础答案要点：对象创建和依赖装配集中在系统边界，业务对象只通过构造参数接收依赖。后续兼容模型 Adapter、Process Adapter 和 Policy 都由这里选择并连接。
 - 替代方案：在 CLI 和各模块中随用随创建；或使用依赖注入框架。
 - 能否不用 Factory：可以用一个普通 `build_application` 函数；关键是保留单一、显式的装配位置，而不是类名本身。
 - 当前等级：L1。
@@ -220,6 +220,17 @@
 - 基础答案要点：`python -m` 执行包内 `__main__.py`；安装时 console script 调用 `minicoder.cli:main`；两者最终复用同一个函数。
 - 深入追问：为什么 `raise SystemExit(main())` 而不是只调用 `main()`？前者把返回值设置为真实进程退出码。
 - 跨平台影响：两种入口均不依赖 Bash 或 PowerShell。
+- 当前等级：L1。
+
+### I01-Q13：为什么配置变量不能命名为 `DEEPSEEK_*`？
+
+- 增量/Commit：I01 修正 / `f5cafa1`。
+- 对应代码：`src/minicoder/config.py::AppConfig.from_environment`、`_required_text`、`.env.example`。
+- 对应测试：`tests/unit/test_config.py::test_model_settings_are_provider_neutral`。
+- 基础答案要点：DeepSeek 是开发者本地选择，不是产品架构约束。通用变量让相同代码通过 base URL、模型 ID 和凭证连接任意 OpenAI 兼容 tool calling 服务。
+- 深入追问：为什么不再给 base URL 和模型设置 DeepSeek 默认值？默认值仍会形成隐式供应商绑定，也可能让客户误把请求发到错误端点。
+- 替代方案：为每个供应商设计独立变量，或增加 profile 配置文件；前者扩展成本高，后者可在后续供应商原生协议增多时采用。
+- 能否支持所有模型：不能自动支持任意协议；第一版支持 OpenAI 兼容 Chat Completions/tool calling，原生 Anthropic 等协议需要新增 Adapter，但 AgentEngine 不变。
 - 当前等级：L1。
 
 ## 7. I02 以后追加内容的位置

@@ -59,7 +59,7 @@ python -m minicoder --workspace ./demo_project
 
 ## 4. 总体架构与数据流
 
-整体采用六边形架构。Agent 核心只依赖 Port 接口，不直接依赖 DeepSeek SDK、具体操作系统或终端实现。详细模式选择见 `ARCHITECTURE_PATTERN_RESEARCH.md`。
+整体采用六边形架构。Agent 核心只依赖 Port 接口，不直接依赖具体模型 SDK、操作系统或终端实现。详细模式选择见 `ARCHITECTURE_PATTERN_RESEARCH.md`。
 
 ```text
 用户任务
@@ -108,7 +108,7 @@ src/minicoder/
     process.py            # 跨平台命令工具
     safety.py             # 路径与命令策略
   adapters/
-    deepseek_chat.py      # Adapter/Gateway
+    openai_compatible_chat.py  # 供应商中立的 Adapter/Gateway
     process_posix.py      # macOS/Linux Process Adapter
     process_windows.py    # Windows Process Adapter
     console.py            # CLI 和 Console Event Sink
@@ -132,9 +132,9 @@ docs/
 
 负责把环境变量和命令行参数转换成明确配置：
 
-- `DEEPSEEK_API_KEY`
-- `DEEPSEEK_BASE_URL`，默认 `https://api.deepseek.com`
-- `DEEPSEEK_MODEL`，默认 `deepseek-v4-pro`
+- `MINICODER_API_KEY`，模型服务凭证
+- `MINICODER_BASE_URL`，OpenAI 兼容 API 地址
+- `MINICODER_MODEL`，供应商提供的模型 ID
 - `workspace`
 - `max_steps`，默认 20
 - `command_timeout`，默认 30 秒
@@ -143,7 +143,7 @@ docs/
 
 启动时统一校验，避免运行到一半才发现缺配置。
 
-### 6.2 `ModelPort` 与 `DeepSeekChatAdapter`
+### 6.2 `ModelPort` 与 `OpenAICompatibleChatAdapter`
 
 只做四件事：
 
@@ -230,7 +230,10 @@ class ToolResult:
 - 设置超时。
 - 同时捕获 stdout 和 stderr。
 - 返回 exit code。
-- 输出过长时保留开头和结尾，并标记已截断。
+- 输出未超预算时完整返回。
+- 输出过长时将完整内容保存在本地会话 artifact 中，给模型返回 `output_id`、原始长度、截断标志和 exit code。
+- 压缩内容组合“开头 + 错误关键词附近的诊断窗口 + 结尾”，并对重叠片段去重。
+- 如果重要信息仍未包含，模型可通过 `read_tool_output(output_id, offset, limit)` 按需读取指定分块。
 - 基础拦截明显危险程序和参数，例如提权、关机、磁盘格式化、递归删除宽泛路径。
 - 第一版不支持交互式命令，不支持长期后台进程。
 - 工具参数使用 `argv: list[str]`，默认 `shell=False`，避免依赖 Bash 或 PowerShell 的字符串解析。
@@ -261,7 +264,7 @@ class ToolResult:
 
 压缩分两步：
 
-- 工具执行时就限制单条输出，防止一次测试日志占满上下文。
+- 工具执行时先做诊断感知的分层输出压缩，防止一次测试日志占满上下文，同时保留完整 artifact 供按需读取。
 - 总历史超过预算时，将较早消息总结成“已完成动作、关键发现、未解决问题、文件变化、验证状态”，同时保留最近消息。
 
 第一版用字符数近似预算，理由是供应商可替换且实现易懂。必须在 README 中说明它不是精确 token 计算。
@@ -310,7 +313,7 @@ Agent 维护：
 | 路径越界 | 返回 `PATH_OUTSIDE_WORKSPACE` |
 | 文件不存在/匹配不唯一 | 返回明确错误，不产生部分修改 |
 | 命令超时 | 终止子进程并返回已有输出 |
-| 输出过长 | 截断并明确标记 |
+| 输出过长 | 保存完整 artifact，返回开头、诊断窗口、结尾和可继续读取的 `output_id` |
 | 达到最大步数 | 安全结束并报告已完成和未完成内容 |
 
 ## 8. 测试方案
@@ -319,7 +322,7 @@ Agent 维护：
 
 - 路径安全：正常、`../`、绝对路径、符号链接逃逸。
 - 文件工具：创建、读取分页、唯一替换、零匹配、多匹配、二进制文件。
-- 命令工具：成功、非零退出、stderr、超时、输出截断、危险命令。
+- 命令工具：成功、非零退出、stderr、超时、诊断感知压缩、artifact 分块读取、危险命令。
 - Registry：正常分发、未知工具、非法 JSON、缺少参数。
 - Context：预算内不压缩、超预算压缩、永久信息不丢失。
 
@@ -371,7 +374,7 @@ Fake Client 依次返回预先设计的 tool calls，用来证明：
 
 ### 8 月 29 日：安全和错误处理
 
-- 实现 workspace 路径边界、命令超时、输出截断和风险拦截。
+- 实现 workspace 路径边界、命令超时、分层输出压缩和风险拦截。
 - 补单元测试。
 - 练习解释 tool calling 与本地工具执行的区别。
 
@@ -425,7 +428,7 @@ Fake Client 依次返回预先设计的 tool calls，用来证明：
 建议增量顺序：
 
 - I01：项目骨架、Config、领域值对象和 ApplicationFactory。
-- I02：ModelPort、DeepSeekChatAdapter 和 FakeModelAdapter。
+- I02：ModelPort、OpenAICompatibleChatAdapter 和 FakeModelAdapter。
 - I03：Tool Command、Registry 和 JSON Schema 参数校验。
 - I04：文件工具和 workspace 路径安全。
 - I05：跨平台 ProcessPort、POSIX/Windows Adapter 和命令策略。
@@ -439,6 +442,6 @@ Fake Client 依次返回预先设计的 tool calls，用来证明：
 
 ## 13. 已确认与剩余事项
 
-- 已确认 Python、CLI、DeepSeek V4 Pro、较高每日投入和三平台兼容。
+- 已确认 Python、CLI、本地使用 DeepSeek V4 Pro、产品支持多种兼容模型、较高每日投入和三平台兼容。
 - GitHub 公开仓库尚未创建；题目要求公开仓库，所以仅本地 Git 不足。
 - 视频演示任务已经冻结为“已有失败测试的半成品待办 CLI”；具体目标项目代码在 I11 创建，并在创建后再增加与真实代码对应的问题。

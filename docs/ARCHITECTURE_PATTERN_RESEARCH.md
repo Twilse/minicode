@@ -30,7 +30,7 @@
 
 ## 3. 选定的总体架构：六边形架构
 
-内部核心不直接认识 DeepSeek SDK、终端颜色、文件系统实现或具体操作系统。
+内部核心不直接认识具体模型 SDK、终端颜色、文件系统实现或操作系统。
 
 ```text
                     入站 Adapter
@@ -45,7 +45,7 @@
                  ^      ^      ^
                  |Port  |Port  |Port
                  |      |      |
-        DeepSeekAdapter |   EventSink Adapters
+ OpenAICompatibleAdapter |   EventSink Adapters
                         |
                  Local Tool Adapters
 ```
@@ -59,7 +59,7 @@
 
 ### Adapters
 
-- `DeepSeekChatAdapter`：把内部消息转换为 OpenAI 兼容 Chat Completions 参数，再把响应转换回内部对象。
+- `OpenAICompatibleChatAdapter`：把内部消息转换为 OpenAI 兼容 Chat Completions 参数，再把任意兼容供应商的响应转换回内部对象。
 - `CliAdapter`：读取用户任务并展示事件。
 - `LocalFileTool`、`LocalProcessTool`：执行真实本地操作。
 - `FakeModelAdapter`、`MemoryEventSink`：测试替身。
@@ -68,9 +68,9 @@
 
 ### 4.1 Adapter / Gateway
 
-问题：DeepSeek/OpenAI SDK 返回对象、异常和参数名不应渗透到 Agent 核心。
+问题：具体模型供应商和 OpenAI 兼容 SDK 的返回对象、异常及参数名不应渗透到 Agent 核心。
 
-实现：`DeepSeekChatAdapter` 实现内部 `ModelPort`，负责协议翻译。它同时具有 Gateway 的作用：外部 API 只从这里进入系统。
+实现：`OpenAICompatibleChatAdapter` 实现内部 `ModelPort`，负责协议翻译。它同时具有 Gateway 的作用：外部 API 只从这里进入系统。
 
 不用会怎样：AgentEngine 会到处出现 `client.chat.completions.create`、SDK 异常和厂商字段，难以测试或切换供应商。
 
@@ -150,11 +150,26 @@ ToolCall
 
 为什么不完整使用 GoF State 类模式：状态行为数量有限，类数量膨胀的成本高于收益；枚举加转换函数足以表达约束。
 
+### 4.8 诊断感知的长输出压缩
+
+问题：测试、编译和安装命令可能产生远超模型预算的输出，但错误位置不一定只在末尾。
+
+候选方案：
+
+- 只保留开头：能看到命令上下文和版本信息，但常丢失最终错误摘要。
+- 只保留结尾：适合多数测试命令，但可能丢失最先出现的根因和执行参数。
+- 只保留开头与结尾：确定、通用、便于测试，但关键诊断可能位于中间。
+- 关键词抽取：能抓取 `error`、`failed`、`traceback` 附近内容，但可能误判或漏掉非英文诊断。
+- 让模型总结全部输出：摘要质量较好，但必须先把完整输出发送给模型，不能解决上下文和费用问题。
+- 只保存文件并返回路径：最省上下文，但模型需要额外调用才能看到任何错误。
+
+最终采用组合策略：短输出完整返回；长输出完整保存在会话 artifact 中，同时返回开头、诊断关键词附近窗口、结尾和结构化 metadata；模型可凭 `output_id` 按需读取遗漏区间。该方案比单纯 head-tail 多一些实现和测试成本，但保留信息、预算控制和确定性之间更平衡。
+
 ## 5. 三个最终技术亮点
 
 ### 亮点一：六边形 Agent 内核
 
-组合 Adapter/Gateway、Factory、Strategy 和依赖倒置。真实 DeepSeek 与 Fake Model 走同一 Port，可在无网络测试中完整驱动 Agent。
+组合 Adapter/Gateway、Factory、Strategy 和依赖倒置。任意真实兼容模型与 Fake Model 走同一 Port，可在无网络测试中完整驱动 Agent。
 
 ### 亮点二：策略化安全工具流水线
 
@@ -164,7 +179,7 @@ ToolCall
 
 上下文采用确定性裁剪加结构化摘要；完成策略追踪修改和验证证据。模型过早结束或验证失败时，状态机继续驱动修复，并由 Observer 产生可审计 trace。
 
-## 6. DeepSeek 官方接口核对
+## 6. 本地 DeepSeek 配置与供应商中立边界
 
 官方资料：
 
@@ -178,11 +193,11 @@ ToolCall
 
 - 模型参数是 `deepseek-v4-pro`，用户记忆正确。
 - OpenAI 格式 base URL 是 `https://api.deepseek.com`。
-- API Key 是平台生成的密钥值，不存在模型专属的“API Key 名称”。环境变量名由应用自行约定，本项目使用 `DEEPSEEK_API_KEY`。
-- 另设 `DEEPSEEK_MODEL=deepseek-v4-pro` 和 `DEEPSEEK_BASE_URL=https://api.deepseek.com`。
+- API Key 是平台生成的密钥值，不存在模型专属的“API Key 名称”。产品统一读取 `MINICODER_API_KEY`。
+- 产品同时读取 `MINICODER_MODEL` 和 `MINICODER_BASE_URL`。本地 DeepSeek 示例分别填写 `deepseek-v4-pro` 和 `https://api.deepseek.com`；其他兼容供应商填写自己的值，不修改代码。
 - DeepSeek tool calling 只返回结构化调用，具体函数必须由客户端执行，符合题目要求。
 - 官方搜索缓存与当前 Responses API 页面在 V4-Pro 支持状态上出现过冲突。为了降低临近截止日期使用新接口的风险，第一版采用长期明确支持 V4-Pro 的 Chat Completions；内部 `ModelPort` 允许以后添加 Responses Adapter。
-- 不依赖 DeepSeek 的服务端 web search、代码执行或文件工具。
+- 不依赖任何模型供应商的服务端 web search、代码执行或文件工具。
 
 ## 7. 跨平台设计
 
