@@ -1,0 +1,27 @@
+# Python bytecode and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments and build outputs
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Local secrets and runtime traces
+.env
+.env.*
+!.env.example
+*.jsonl
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Assessment source document is kept locally, not published with the code.
+推免考核题目学生版.pdf
