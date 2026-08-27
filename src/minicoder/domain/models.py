@@ -37,6 +37,30 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolDefinition:
+    """A provider-neutral function tool advertised to a language model."""
+
+    name: str  # Stable tool name used in a later ToolCall.
+    description: str  # Plain-language guidance that helps the model choose the tool.
+    parameters_schema: Mapping[str, Any]  # JSON Schema for the tool arguments object.
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise DomainValidationError("tool definition name must not be empty")
+        if not self.description.strip():
+            raise DomainValidationError("tool definition description must not be empty")
+        if self.parameters_schema.get("type") != "object":
+            raise DomainValidationError(
+                "tool definition parameters_schema must describe an object"
+            )
+        object.__setattr__(
+            self,
+            "parameters_schema",
+            MappingProxyType(dict(self.parameters_schema)),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Message:
     """One normalized conversation message, independent of an SDK type."""
 
@@ -57,6 +81,13 @@ class Message:
             raise DomainValidationError("tool messages require a tool_call_id")
         if self.role is not MessageRole.TOOL and self.tool_call_id is not None:
             raise DomainValidationError("only tool messages may contain a tool_call_id")
+        if (
+            self.reasoning_content is not None
+            and self.role is not MessageRole.ASSISTANT
+        ):
+            raise DomainValidationError(
+                "only assistant messages may contain reasoning_content"
+            )
 
 
 @dataclass(frozen=True, slots=True)

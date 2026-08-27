@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlparse
@@ -20,6 +21,7 @@ class AppConfig:
     model: str
     workspace: Path
     max_steps: int  # Maximum agent iterations before forced termination.
+    model_timeout_seconds: float  # Timeout for one model API request in seconds.
     command_timeout_seconds: float  # Per-command execution timeout in seconds.
     max_tool_output_chars: int  # Maximum characters returned by one tool call.
     context_budget_chars: int  # Approximate character budget for conversation history.
@@ -34,6 +36,7 @@ class AppConfig:
             f"model={self.model!r}, "
             f"workspace={self.workspace!r}, "
             f"max_steps={self.max_steps!r}, "
+            f"model_timeout_seconds={self.model_timeout_seconds!r}, "
             f"command_timeout_seconds={self.command_timeout_seconds!r}, "
             f"max_tool_output_chars={self.max_tool_output_chars!r}, "
             f"context_budget_chars={self.context_budget_chars!r}"
@@ -74,6 +77,11 @@ class AppConfig:
             model=model,
             workspace=workspace_path,
             max_steps=_positive_int(source, "MINICODER_MAX_STEPS", 20),
+            model_timeout_seconds=_positive_float(
+                source,
+                "MINICODER_MODEL_TIMEOUT_SECONDS",
+                60.0,
+            ),
             command_timeout_seconds=_positive_float(
                 source,
                 "MINICODER_COMMAND_TIMEOUT_SECONDS",
@@ -134,6 +142,6 @@ def _positive_float(
         value = float(raw_value)
     except ValueError as exc:
         raise ConfigurationError(f"{name} must be a number") from exc
-    if value <= 0:
-        raise ConfigurationError(f"{name} must be greater than zero")
+    if not isfinite(value) or value <= 0:
+        raise ConfigurationError(f"{name} must be a finite number greater than zero")
     return value

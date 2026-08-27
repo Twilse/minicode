@@ -25,6 +25,7 @@ def test_from_environment_loads_required_model_settings_and_safe_defaults(
     assert config.model == "deepseek-v4-pro"
     assert config.workspace == tmp_path.resolve()
     assert config.max_steps == 20
+    assert config.model_timeout_seconds == 60.0
     assert config.command_timeout_seconds == 30.0
 
 
@@ -35,6 +36,7 @@ def test_from_environment_accepts_explicit_overrides(tmp_path: Path) -> None:
             "MINICODER_BASE_URL": "http://localhost:9000/",
             "MINICODER_MODEL": "test-model",
             "MINICODER_MAX_STEPS": "7",
+            "MINICODER_MODEL_TIMEOUT_SECONDS": "15.5",
             "MINICODER_COMMAND_TIMEOUT_SECONDS": "2.5",
             "MINICODER_MAX_TOOL_OUTPUT_CHARS": "800",
             "MINICODER_CONTEXT_BUDGET_CHARS": "9000",
@@ -45,6 +47,7 @@ def test_from_environment_accepts_explicit_overrides(tmp_path: Path) -> None:
     assert config.base_url == "http://localhost:9000"
     assert config.model == "test-model"
     assert config.max_steps == 7
+    assert config.model_timeout_seconds == 15.5
     assert config.command_timeout_seconds == 2.5
     assert config.max_tool_output_chars == 800
     assert config.context_budget_chars == 9000
@@ -80,6 +83,14 @@ def test_from_environment_accepts_explicit_overrides(tmp_path: Path) -> None:
         (
             {**REQUIRED_MODEL_ENV, "MINICODER_MAX_STEPS": "0"},
             "must be greater than zero",
+        ),
+        (
+            {**REQUIRED_MODEL_ENV, "MINICODER_MODEL_TIMEOUT_SECONDS": "nan"},
+            "finite number greater than zero",
+        ),
+        (
+            {**REQUIRED_MODEL_ENV, "MINICODER_MODEL_TIMEOUT_SECONDS": "inf"},
+            "finite number greater than zero",
         ),
     ],
 )

@@ -6,6 +6,7 @@ from minicoder.domain.models import (
     Message,
     MessageRole,
     ToolCall,
+    ToolDefinition,
     ToolResult,
 )
 
@@ -105,3 +106,54 @@ def test_failed_tool_result_requires_non_blank_error_code(
 def test_message_rejects_plain_string_role_at_runtime() -> None:
     with pytest.raises(DomainValidationError, match="MessageRole"):
         Message(role="user", content="hello")  # type: ignore[arg-type]
+
+
+def test_tool_definition_copies_its_top_level_schema() -> None:
+    schema = {"type": "object", "properties": {}}
+    definition = ToolDefinition(
+        name="read_file",
+        description="Read one text file.",
+        parameters_schema=schema,
+    )
+
+    schema["type"] = "string"
+
+    assert definition.parameters_schema["type"] == "object"
+    with pytest.raises(TypeError):
+        definition.parameters_schema["type"] = "string"  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        {
+            "name": "",
+            "description": "Read one text file.",
+            "parameters_schema": {"type": "object"},
+        },
+        {
+            "name": "read_file",
+            "description": "   ",
+            "parameters_schema": {"type": "object"},
+        },
+        {
+            "name": "read_file",
+            "description": "Read one text file.",
+            "parameters_schema": {"type": "string"},
+        },
+    ],
+)
+def test_tool_definition_rejects_invalid_protocol_fields(
+    definition: dict[str, object],
+) -> None:
+    with pytest.raises(DomainValidationError):
+        ToolDefinition(**definition)  # type: ignore[arg-type]
+
+
+def test_message_rejects_reasoning_on_non_assistant_role() -> None:
+    with pytest.raises(DomainValidationError, match="only assistant"):
+        Message(
+            role=MessageRole.USER,
+            content="hello",
+            reasoning_content="hidden reasoning",
+        )
