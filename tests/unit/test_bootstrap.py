@@ -6,7 +6,11 @@ from minicoder.platforms import OperatingSystem
 
 def test_factory_creates_validated_bootstrap_context(tmp_path: Path) -> None:
     context = ApplicationFactory.create_bootstrap_context(
-        environ={"DEEPSEEK_API_KEY": "key"},
+        environ={
+            "MINICODER_API_KEY": "key",
+            "MINICODER_BASE_URL": "https://api.deepseek.com",
+            "MINICODER_MODEL": "deepseek-v4-pro",
+        },
         workspace=tmp_path,
         platform_name="win32",
     )

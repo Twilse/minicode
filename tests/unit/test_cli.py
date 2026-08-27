@@ -10,7 +10,11 @@ def test_check_config_prints_safe_summary(tmp_path: Path) -> None:
 
     exit_code = main(
         ["--check-config", "--workspace", str(tmp_path)],
-        environ={"DEEPSEEK_API_KEY": "never-print-this"},
+        environ={
+            "MINICODER_API_KEY": "never-print-this",
+            "MINICODER_BASE_URL": "https://api.deepseek.com",
+            "MINICODER_MODEL": "deepseek-v4-pro",
+        },
         stdout=stdout,
         stderr=stderr,
     )
@@ -35,4 +39,4 @@ def test_check_config_returns_two_for_user_configuration_error(
     )
 
     assert exit_code == 2
-    assert "DEEPSEEK_API_KEY is required" in stderr.getvalue()
+    assert "MINICODER_API_KEY is required" in stderr.getvalue()

@@ -9,7 +9,9 @@ The project is currently being developed in small, test-backed increments. Do no
 I01 provides the installable Python package, validated configuration, cross-platform detection, immutable domain values, and the application bootstrap factory.
 
 ```bash
-export DEEPSEEK_API_KEY="your-key"
+export MINICODER_API_KEY="your-key"
+export MINICODER_BASE_URL="https://api.deepseek.com"
+export MINICODER_MODEL="deepseek-v4-pro"
 python -m minicoder --check-config --workspace .
 ```
 

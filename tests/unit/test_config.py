@@ -5,10 +5,18 @@ import pytest
 from minicoder.config import AppConfig
 from minicoder.domain.errors import ConfigurationError
 
+REQUIRED_MODEL_ENV = {
+    "MINICODER_API_KEY": "secret-value",
+    "MINICODER_BASE_URL": "https://api.deepseek.com",
+    "MINICODER_MODEL": "deepseek-v4-pro",
+}
 
-def test_from_environment_uses_safe_defaults(tmp_path: Path) -> None:
+
+def test_from_environment_loads_required_model_settings_and_safe_defaults(
+    tmp_path: Path,
+) -> None:
     config = AppConfig.from_environment(
-        {"DEEPSEEK_API_KEY": "secret-value"},
+        REQUIRED_MODEL_ENV,
         workspace=tmp_path,
     )
 
@@ -23,9 +31,9 @@ def test_from_environment_uses_safe_defaults(tmp_path: Path) -> None:
 def test_from_environment_accepts_explicit_overrides(tmp_path: Path) -> None:
     config = AppConfig.from_environment(
         {
-            "DEEPSEEK_API_KEY": "secret-value",
-            "DEEPSEEK_BASE_URL": "http://localhost:9000/",
-            "DEEPSEEK_MODEL": "test-model",
+            "MINICODER_API_KEY": "secret-value",
+            "MINICODER_BASE_URL": "http://localhost:9000/",
+            "MINICODER_MODEL": "test-model",
             "MINICODER_MAX_STEPS": "7",
             "MINICODER_COMMAND_TIMEOUT_SECONDS": "2.5",
             "MINICODER_MAX_TOOL_OUTPUT_CHARS": "800",
@@ -45,17 +53,32 @@ def test_from_environment_accepts_explicit_overrides(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("environ", "message"),
     [
-        ({}, "DEEPSEEK_API_KEY is required"),
+        ({}, "MINICODER_API_KEY is required"),
         (
-            {"DEEPSEEK_API_KEY": "key", "DEEPSEEK_BASE_URL": "not-a-url"},
+            {"MINICODER_API_KEY": "key"},
+            "MINICODER_BASE_URL is required",
+        ),
+        (
+            {
+                "MINICODER_API_KEY": "key",
+                "MINICODER_BASE_URL": "https://example.com/v1",
+            },
+            "MINICODER_MODEL is required",
+        ),
+        (
+            {
+                "MINICODER_API_KEY": "key",
+                "MINICODER_BASE_URL": "not-a-url",
+                "MINICODER_MODEL": "model",
+            },
             "absolute http or https URL",
         ),
         (
-            {"DEEPSEEK_API_KEY": "key", "MINICODER_MAX_STEPS": "zero"},
+            {**REQUIRED_MODEL_ENV, "MINICODER_MAX_STEPS": "zero"},
             "must be an integer",
         ),
         (
-            {"DEEPSEEK_API_KEY": "key", "MINICODER_MAX_STEPS": "0"},
+            {**REQUIRED_MODEL_ENV, "MINICODER_MAX_STEPS": "0"},
             "must be greater than zero",
         ),
     ],
@@ -74,14 +97,28 @@ def test_from_environment_rejects_missing_workspace(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigurationError, match="workspace does not exist"):
         AppConfig.from_environment(
-            {"DEEPSEEK_API_KEY": "key"},
+            REQUIRED_MODEL_ENV,
             workspace=missing,
         )
 
 
+def test_model_settings_are_provider_neutral(tmp_path: Path) -> None:
+    config = AppConfig.from_environment(
+        {
+            "MINICODER_API_KEY": "another-provider-key",
+            "MINICODER_BASE_URL": "https://models.example.com/v1",
+            "MINICODER_MODEL": "another-coding-model",
+        },
+        workspace=tmp_path,
+    )
+
+    assert config.base_url == "https://models.example.com/v1"
+    assert config.model == "another-coding-model"
+
+
 def test_config_repr_does_not_reveal_api_key(tmp_path: Path) -> None:
     config = AppConfig.from_environment(
-        {"DEEPSEEK_API_KEY": "never-print-this"},
+        {**REQUIRED_MODEL_ENV, "MINICODER_API_KEY": "never-print-this"},
         workspace=tmp_path,
     )
 
