@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from copy import deepcopy
 from typing import Any, NoReturn
 
@@ -12,6 +12,8 @@ from jsonschema.exceptions import SchemaError, ValidationError
 
 from minicoder.domain.errors import ToolRegistrationError
 from minicoder.domain.models import ToolDefinition
+
+_MAX_REPORTED_ARGUMENT_ERRORS = 5
 
 
 class ToolArgumentsError(ValueError):
@@ -55,11 +57,7 @@ def parse_and_validate_arguments(
 
     errors = sorted(validator.iter_errors(value), key=_validation_error_sort_key)
     if errors:
-        error = errors[0]
-        raise ToolArgumentsError(
-            f"arguments failed schema validation at "
-            f"{_format_json_path(error.absolute_path)}: {error.message}"
-        )
+        raise ToolArgumentsError(_format_validation_errors(errors))
     return value
 
 
@@ -81,6 +79,25 @@ def _reject_non_json_constant(value: str) -> NoReturn:
 def _validation_error_sort_key(error: ValidationError) -> tuple[str, str]:
     path = "/".join(str(part) for part in error.absolute_path)
     return path, error.message
+
+
+def _format_validation_errors(errors: Sequence[ValidationError]) -> str:
+    reported = errors[:_MAX_REPORTED_ARGUMENT_ERRORS]
+    total = len(errors)
+    if total <= _MAX_REPORTED_ARGUMENT_ERRORS:
+        suffix = f"{total} {'error' if total == 1 else 'errors'}"
+    else:
+        suffix = f"{total} errors; showing first {_MAX_REPORTED_ARGUMENT_ERRORS}"
+
+    lines = [f"arguments failed schema validation ({suffix}):"]
+    lines.extend(
+        f"{index}. {_format_json_path(error.absolute_path)}: {error.message}"
+        for index, error in enumerate(reported, start=1)
+    )
+    omitted = total - len(reported)
+    if omitted:
+        lines.append(f"{omitted} additional validation errors omitted.")
+    return "\n".join(lines)
 
 
 def _format_json_path(path: Iterable[str | int]) -> str:

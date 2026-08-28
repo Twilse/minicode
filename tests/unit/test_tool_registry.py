@@ -177,6 +177,36 @@ def test_registry_rejects_arguments_that_violate_the_tool_schema(
     assert tool.commands == []
 
 
+def test_registry_reports_at_most_five_sorted_schema_errors() -> None:
+    required_fields = [f"field_{index}" for index in range(7)]
+    definition = _definition(
+        schema={
+            "type": "object",
+            "properties": {
+                field: {"type": "string"} for field in required_fields
+            },
+            "required": required_fields,
+        }
+    )
+    registry = ToolRegistry((RecordingTool(definition),))
+
+    result = registry.execute(
+        ToolCall(id="call-1", name="read_file", arguments_json="{}")
+    )
+
+    lines = result.content.splitlines()
+    assert result.error_code == INVALID_ARGUMENTS
+    assert lines[0] == (
+        "arguments failed schema validation (7 errors; showing first 5):"
+    )
+    assert len(lines) == 7
+    for index in range(5):
+        assert f"'{required_fields[index]}' is a required property" in lines[index + 1]
+    assert "field_5" not in result.content
+    assert "field_6" not in result.content
+    assert lines[-1] == "2 additional validation errors omitted."
+
+
 def test_registry_rejects_duplicate_tool_names() -> None:
     registry = ToolRegistry((RecordingTool(),))
 
