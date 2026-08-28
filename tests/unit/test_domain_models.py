@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from minicoder.domain.errors import DomainValidationError
@@ -37,6 +39,12 @@ def test_tool_result_converts_to_correlated_tool_message() -> None:
 
     assert message.role is MessageRole.TOOL
     assert message.tool_call_id == "call-1"
+    assert json.loads(message.content or "") == {
+        "ok": True,
+        "content": "print('hello')",
+        "error_code": None,
+    }
+    assert "chars" not in (message.content or "")
     assert result.metadata["chars"] == 14
 
 

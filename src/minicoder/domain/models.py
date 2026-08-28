@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
@@ -133,11 +134,24 @@ class ToolResult:
             raise DomainValidationError("failed tool results require an error_code")
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
+    def model_content(self) -> str:
+        """Return a deterministic provider-neutral envelope for a tool message."""
+
+        return json.dumps(
+            {
+                "ok": self.ok,
+                "content": self.content,
+                "error_code": self.error_code,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
     def as_message(self) -> Message:
         """Convert the result into the tool message returned to the model."""
 
         return Message(
             role=MessageRole.TOOL,
-            content=self.content,
+            content=self.model_content(),
             tool_call_id=self.call_id,
         )

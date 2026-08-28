@@ -5,7 +5,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol
 
-from minicoder.domain.models import AssistantTurn, Message, ToolDefinition
+from minicoder.domain.models import (
+    AssistantTurn,
+    Message,
+    ToolCall,
+    ToolDefinition,
+    ToolResult,
+)
 
 
 class ModelPort(Protocol):
@@ -18,5 +24,19 @@ class ModelPort(Protocol):
         tools: Sequence[ToolDefinition],
     ) -> AssistantTurn:
         """Send one conversation snapshot and return one assistant turn."""
+
+        ...
+
+
+class ToolPort(Protocol):
+    """Expose registered local tools without coupling the core to dispatch details."""
+
+    def definitions(self) -> Sequence[ToolDefinition]:
+        """Return the tool schemas that may be advertised to a model."""
+
+        ...
+
+    def execute(self, call: ToolCall) -> ToolResult:
+        """Validate and execute one model-issued tool call."""
 
         ...

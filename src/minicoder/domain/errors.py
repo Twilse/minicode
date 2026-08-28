@@ -13,6 +13,10 @@ class DomainValidationError(MiniCoderError, ValueError):
     """Raised when an internal domain value violates an invariant."""
 
 
+class ToolRegistrationError(MiniCoderError, ValueError):
+    """Raised when a local tool cannot be safely added to the registry."""
+
+
 class UnsupportedPlatformError(ConfigurationError):
     """Raised when no safe process adapter exists for the current platform."""
 
