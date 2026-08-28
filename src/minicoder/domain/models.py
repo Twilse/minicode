@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from enum import Enum
+from math import isfinite
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -155,3 +156,47 @@ class ToolResult:
             content=self.model_content(),
             tool_call_id=self.call_id,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessResult:
+    """Provider-neutral facts captured from one local child process."""
+
+    stdout: str  # Standard output decoded and normalized to LF line endings.
+    stderr: str  # Standard error decoded and normalized to LF line endings.
+    exit_code: int | None  # Child exit status, or None when execution timed out.
+    timed_out: bool  # Whether the host terminated the child after its deadline.
+    duration_seconds: float  # Monotonic elapsed execution time in seconds.
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.stdout, str) or not isinstance(self.stderr, str):
+            raise DomainValidationError("process output must be text")
+        if not isinstance(self.timed_out, bool):
+            raise DomainValidationError("process timed_out must be a boolean")
+        if self.exit_code is not None and (
+            not isinstance(self.exit_code, int) or isinstance(self.exit_code, bool)
+        ):
+            raise DomainValidationError("process exit_code must be an integer or None")
+        if self.timed_out and self.exit_code is not None:
+            raise DomainValidationError("timed-out processes cannot have an exit_code")
+        if not self.timed_out and self.exit_code is None:
+            raise DomainValidationError("completed processes require an exit_code")
+        if (
+            not isinstance(self.duration_seconds, (int, float))
+            or isinstance(self.duration_seconds, bool)
+            or not isfinite(self.duration_seconds)
+            or self.duration_seconds < 0
+        ):
+            raise DomainValidationError(
+                "process duration_seconds must be finite and non-negative"
+            )
+
+    def combined_output(self) -> str:
+        """Return all captured output while labeling distinct streams when needed."""
+
+        if not self.stdout:
+            return self.stderr
+        if not self.stderr:
+            return self.stdout
+        separator = "" if self.stdout.endswith("\n") else "\n"
+        return f"[stdout]\n{self.stdout}{separator}[stderr]\n{self.stderr}"

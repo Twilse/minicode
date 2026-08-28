@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Protocol
 
 from minicoder.domain.models import (
     AssistantTurn,
     Message,
+    ProcessResult,
     ToolCall,
     ToolDefinition,
     ToolResult,
@@ -38,5 +40,20 @@ class ToolPort(Protocol):
 
     def execute(self, call: ToolCall) -> ToolResult:
         """Validate and execute one model-issued tool call."""
+
+        ...
+
+
+class ProcessPort(Protocol):
+    """Execute one non-interactive child process without exposing subprocess types."""
+
+    def run(
+        self,
+        *,
+        argv: Sequence[str],
+        cwd: Path,
+        timeout_seconds: float,
+    ) -> ProcessResult:
+        """Run an argument vector in one directory and capture its bounded lifetime."""
 
         ...

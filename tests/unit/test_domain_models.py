@@ -7,6 +7,7 @@ from minicoder.domain.models import (
     AssistantTurn,
     Message,
     MessageRole,
+    ProcessResult,
     ToolCall,
     ToolDefinition,
     ToolResult,
@@ -165,3 +166,55 @@ def test_message_rejects_reasoning_on_non_assistant_role() -> None:
             content="hello",
             reasoning_content="hidden reasoning",
         )
+
+
+def test_process_result_combines_distinct_output_streams() -> None:
+    result = ProcessResult(
+        stdout="tests started\n",
+        stderr="one warning\n",
+        exit_code=0,
+        timed_out=False,
+        duration_seconds=0.25,
+    )
+
+    assert result.combined_output() == (
+        "[stdout]\ntests started\n[stderr]\none warning\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "timed_out": True,
+            "duration_seconds": 1.0,
+        },
+        {
+            "stdout": "",
+            "stderr": "",
+            "exit_code": None,
+            "timed_out": False,
+            "duration_seconds": 1.0,
+        },
+        {
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "timed_out": False,
+            "duration_seconds": -1.0,
+        },
+        {
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 0,
+            "timed_out": False,
+            "duration_seconds": "slow",
+        },
+    ],
+)
+def test_process_result_rejects_inconsistent_facts(values: dict[str, object]) -> None:
+    with pytest.raises(DomainValidationError):
+        ProcessResult(**values)  # type: ignore[arg-type]
