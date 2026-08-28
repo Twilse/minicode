@@ -9,9 +9,18 @@ from typing import Mapping
 from openai import OpenAI
 
 from minicoder.adapters.openai_compatible_chat import OpenAICompatibleChatAdapter
-from minicoder.application.ports import ModelPort
+from minicoder.application.ports import ModelPort, ToolPort
 from minicoder.config import AppConfig
 from minicoder.platforms import OperatingSystem, detect_operating_system
+from minicoder.tools.files import (
+    CreateFileTool,
+    ListFilesTool,
+    ReadFileTool,
+    ReplaceTextTool,
+    SearchTextTool,
+)
+from minicoder.tools.registry import ToolRegistry
+from minicoder.tools.safety import WorkspacePathPolicy
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,4 +61,19 @@ class ApplicationFactory:
         return OpenAICompatibleChatAdapter(
             client=client,
             model=config.model,
+        )
+
+    @staticmethod
+    def create_tool_registry(config: AppConfig) -> ToolPort:
+        """Create the workspace-scoped collection of local coding tools."""
+
+        paths = WorkspacePathPolicy(config.workspace)
+        return ToolRegistry(
+            (
+                ListFilesTool(paths),
+                ReadFileTool(paths, max_chars=config.max_tool_output_chars),
+                SearchTextTool(paths),
+                CreateFileTool(paths),
+                ReplaceTextTool(paths),
+            )
         )

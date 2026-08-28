@@ -8,6 +8,7 @@ import minicoder.bootstrap as bootstrap_module
 from minicoder.adapters.openai_compatible_chat import OpenAICompatibleChatAdapter
 from minicoder.bootstrap import ApplicationFactory
 from minicoder.config import AppConfig
+from minicoder.domain.models import ToolCall
 from minicoder.platforms import OperatingSystem
 
 
@@ -57,3 +58,39 @@ def test_factory_configures_sdk_client_without_hidden_retries(
         "timeout": 12.5,
         "max_retries": 0,
     }
+
+
+def test_factory_builds_workspace_scoped_file_tools(tmp_path: Path) -> None:
+    config = AppConfig.from_environment(
+        {
+            "MINICODER_API_KEY": "secret-key",
+            "MINICODER_BASE_URL": "https://models.example.com/v1",
+            "MINICODER_MODEL": "coding-model",
+            "MINICODER_MAX_TOOL_OUTPUT_CHARS": "17",
+        },
+        workspace=tmp_path,
+    )
+
+    tools = ApplicationFactory.create_tool_registry(config)
+    definitions = tools.definitions()
+    result = tools.execute(
+        ToolCall(
+            id="call-create",
+            name="create_file",
+            arguments_json='{"path":"created.txt","content":"hello"}',
+        )
+    )
+
+    assert [definition.name for definition in definitions] == [
+        "list_files",
+        "read_file",
+        "search_text",
+        "create_file",
+        "replace_text",
+    ]
+    read_definition = next(
+        definition for definition in definitions if definition.name == "read_file"
+    )
+    assert read_definition.parameters_schema["properties"]["limit"]["maximum"] == 17
+    assert result.ok is True
+    assert (tmp_path / "created.txt").read_text(encoding="utf-8") == "hello"
