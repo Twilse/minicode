@@ -39,14 +39,14 @@ _IGNORED_DIRECTORIES = frozenset(
         "node_modules",
     }
 )
-_BINARY_SAMPLE_BYTES = 8192
-_MAX_LIST_DEPTH = 8
-_MAX_LIST_ENTRIES = 500
-_MAX_SEARCH_LINE_CHARS = 240
-_MAX_SEARCH_FILE_BYTES = 1_000_000
-_MAX_SEARCH_MATCHES = 100
-_MAX_MUTATION_FILE_BYTES = 1_000_000
-_MAX_WRITE_CHARS = 200_000
+_BINARY_SAMPLE_BYTES = 8192  # Bytes sampled to detect nulls in binary files.
+_MAX_LIST_DEPTH = 8  # Maximum recursive directory-listing depth.
+_MAX_LIST_ENTRIES = 500  # Maximum entries returned by one directory listing.
+_MAX_SEARCH_LINE_CHARS = 240  # Maximum preview characters per matching line.
+_MAX_SEARCH_FILE_BYTES = 1_000_000  # Largest file considered by text search.
+_MAX_SEARCH_MATCHES = 100  # Maximum matches returned by one text search.
+_MAX_MUTATION_FILE_BYTES = 1_000_000  # Largest file eligible for replacement.
+_MAX_WRITE_CHARS = 200_000  # Maximum text accepted by one write argument.
 
 
 class ListFilesTool:
