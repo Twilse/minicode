@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 
 from minicoder.domain.errors import ConfigurationError
 
+_MIN_TOOL_OUTPUT_CHARS = 512
+
 
 @dataclass(frozen=True, slots=True)
 class AppConfig:
@@ -87,10 +89,11 @@ class AppConfig:
                 "MINICODER_COMMAND_TIMEOUT_SECONDS",
                 30.0,
             ),
-            max_tool_output_chars=_positive_int(
+            max_tool_output_chars=_int_at_least(
                 source,
                 "MINICODER_MAX_TOOL_OUTPUT_CHARS",
                 12_000,
+                minimum=_MIN_TOOL_OUTPUT_CHARS,
             ),
             context_budget_chars=_positive_int(
                 source,
@@ -144,4 +147,17 @@ def _positive_float(
         raise ConfigurationError(f"{name} must be a number") from exc
     if not isfinite(value) or value <= 0:
         raise ConfigurationError(f"{name} must be a finite number greater than zero")
+    return value
+
+
+def _int_at_least(
+    environ: Mapping[str, str],
+    name: str,
+    default: int,
+    *,
+    minimum: int,
+) -> int:
+    value = _positive_int(environ, name, default)
+    if value < minimum:
+        raise ConfigurationError(f"{name} must be at least {minimum}")
     return value

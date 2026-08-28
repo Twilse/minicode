@@ -85,6 +85,10 @@ def test_from_environment_accepts_explicit_overrides(tmp_path: Path) -> None:
             "must be greater than zero",
         ),
         (
+            {**REQUIRED_MODEL_ENV, "MINICODER_MAX_TOOL_OUTPUT_CHARS": "511"},
+            "must be at least 512",
+        ),
+        (
             {**REQUIRED_MODEL_ENV, "MINICODER_MODEL_TIMEOUT_SECONDS": "nan"},
             "finite number greater than zero",
         ),

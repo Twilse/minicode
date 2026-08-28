@@ -6,6 +6,10 @@ import pytest
 
 import minicoder.bootstrap as bootstrap_module
 from minicoder.adapters.openai_compatible_chat import OpenAICompatibleChatAdapter
+from minicoder.adapters.subprocess_runner import (
+    PosixSubprocessAdapter,
+    WindowsSubprocessAdapter,
+)
 from minicoder.bootstrap import ApplicationFactory
 from minicoder.config import AppConfig
 from minicoder.domain.models import ToolCall
@@ -66,7 +70,7 @@ def test_factory_builds_workspace_scoped_file_tools(tmp_path: Path) -> None:
             "MINICODER_API_KEY": "secret-key",
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "coding-model",
-            "MINICODER_MAX_TOOL_OUTPUT_CHARS": "17",
+            "MINICODER_MAX_TOOL_OUTPUT_CHARS": "512",
         },
         workspace=tmp_path,
     )
@@ -87,10 +91,29 @@ def test_factory_builds_workspace_scoped_file_tools(tmp_path: Path) -> None:
         "search_text",
         "create_file",
         "replace_text",
+        "run_command",
+        "read_tool_output",
     ]
     read_definition = next(
         definition for definition in definitions if definition.name == "read_file"
     )
-    assert read_definition.parameters_schema["properties"]["limit"]["maximum"] == 17
+    assert read_definition.parameters_schema["properties"]["limit"]["maximum"] == 512
     assert result.ok is True
     assert (tmp_path / "created.txt").read_text(encoding="utf-8") == "hello"
+
+
+@pytest.mark.parametrize(
+    ("operating_system", "expected_type"),
+    [
+        (OperatingSystem.MACOS, PosixSubprocessAdapter),
+        (OperatingSystem.LINUX, PosixSubprocessAdapter),
+        (OperatingSystem.WINDOWS, WindowsSubprocessAdapter),
+    ],
+)
+def test_factory_selects_platform_process_adapter(
+    operating_system: OperatingSystem,
+    expected_type: type[object],
+) -> None:
+    adapter = ApplicationFactory.create_process_adapter(operating_system)
+
+    assert isinstance(adapter, expected_type)
