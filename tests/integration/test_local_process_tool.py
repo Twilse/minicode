@@ -10,7 +10,7 @@ from minicoder.platforms import detect_operating_system
 from minicoder.tools.output import ToolOutputArtifactStore
 
 
-def test_factory_registry_runs_a_real_local_python_command(tmp_path: Path) -> None:
+def test_factory_pipeline_runs_a_real_local_python_command(tmp_path: Path) -> None:
     config = AppConfig.from_environment(
         {
             "MINICODER_API_KEY": "not-used",
@@ -25,7 +25,7 @@ def test_factory_registry_runs_a_real_local_python_command(tmp_path: Path) -> No
         max_read_chars=config.max_tool_output_chars // 2,
     )
     try:
-        tools = ApplicationFactory.create_tool_registry(
+        tools = ApplicationFactory.create_tool_pipeline(
             config,
             processes=ApplicationFactory.create_process_adapter(
                 detect_operating_system()
@@ -54,3 +54,7 @@ def test_factory_registry_runs_a_real_local_python_command(tmp_path: Path) -> No
     assert result.metadata["exit_code"] == 0
     assert result.metadata["argv"][0] != "python"
     assert result.content.endswith(f"{tmp_path.name}\n")
+    payload = json.loads(result.model_content())
+    assert payload["metadata"]["exit_code"] == 0
+    assert "argv" not in payload["metadata"]
+    assert len(result.model_content()) <= config.max_tool_output_chars

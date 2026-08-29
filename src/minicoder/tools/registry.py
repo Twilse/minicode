@@ -19,8 +19,6 @@ from minicoder.tools.validation import (
 
 UNKNOWN_TOOL = "UNKNOWN_TOOL"
 INVALID_ARGUMENTS = "INVALID_ARGUMENTS"
-TOOL_EXECUTION_ERROR = "TOOL_EXECUTION_ERROR"
-TOOL_CONTRACT_ERROR = "TOOL_CONTRACT_ERROR"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,7 +57,7 @@ class ToolRegistry:
         return tuple(entry.definition for entry in self._tools.values())
 
     def execute(self, call: ToolCall) -> ToolResult:
-        """Dispatch one raw model call and turn recoverable failures into results."""
+        """Look up, validate, and dispatch one raw model-issued tool call."""
 
         registered = self._tools.get(call.name)
         if registered is None:
@@ -89,29 +87,7 @@ class ToolRegistry:
             tool_name=call.name,
             arguments=arguments,
         )
-        try:
-            result = registered.tool.execute(command)
-        except Exception as exc:
-            return _failure_result(
-                call,
-                error_code=TOOL_EXECUTION_ERROR,
-                content=f"Tool {call.name!r} failed unexpectedly.",
-                metadata={"exception_type": type(exc).__name__},
-            )
-
-        if not isinstance(result, ToolResult):
-            return _failure_result(
-                call,
-                error_code=TOOL_CONTRACT_ERROR,
-                content=f"Tool {call.name!r} returned an invalid result.",
-            )
-        if result.call_id != call.id or result.tool_name != call.name:
-            return _failure_result(
-                call,
-                error_code=TOOL_CONTRACT_ERROR,
-                content=f"Tool {call.name!r} returned an uncorrelated result.",
-            )
-        return result
+        return registered.tool.execute(command)
 
 
 def _failure_result(

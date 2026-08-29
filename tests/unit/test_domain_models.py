@@ -60,9 +60,37 @@ def test_tool_result_converts_to_correlated_tool_message() -> None:
         "ok": True,
         "content": "print('hello')",
         "error_code": None,
+        "metadata": {},
     }
     assert "chars" not in (message.content or "")
     assert result.metadata["chars"] == 14
+
+
+def test_tool_result_only_exposes_explicit_model_metadata() -> None:
+    result = ToolResult(
+        call_id="call-1",
+        tool_name="run_command",
+        ok=True,
+        content="tests passed",
+        metadata={"argv": ["pytest"], "exit_code": 0},
+        model_metadata={"exit_code": 0},
+    )
+
+    payload = json.loads(result.model_content())
+
+    assert payload["metadata"] == {"exit_code": 0}
+    assert "argv" not in result.model_content()
+
+
+def test_tool_result_rejects_non_json_model_metadata() -> None:
+    with pytest.raises(DomainValidationError, match="model_metadata"):
+        ToolResult(
+            call_id="call-1",
+            tool_name="read_file",
+            ok=True,
+            content="ok",
+            model_metadata={"unsafe": object()},
+        )
 
 
 def test_tool_result_copies_metadata_to_preserve_immutability() -> None:

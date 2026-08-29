@@ -137,19 +137,42 @@ class ToolResult:
     content: str  # Human- and model-readable result or error explanation.
     error_code: str | None = None  # Stable machine-readable code for a failed result.
     metadata: Mapping[str, Any] = field(default_factory=dict)  # Host-side result details.
+    model_metadata: Mapping[str, Any] = field(  # Safe structured facts sent to model.
+        default_factory=dict
+    )
 
     def __post_init__(self) -> None:
-        if not self.call_id.strip():
+        if not isinstance(self.call_id, str) or not self.call_id.strip():
             raise DomainValidationError("tool result call_id must not be empty")
-        if not self.tool_name.strip():
+        if not isinstance(self.tool_name, str) or not self.tool_name.strip():
             raise DomainValidationError("tool result tool_name must not be empty")
+        if not isinstance(self.ok, bool):
+            raise DomainValidationError("tool result ok must be a boolean")
+        if not isinstance(self.content, str):
+            raise DomainValidationError("tool result content must be text")
         if self.ok and self.error_code is not None:
             raise DomainValidationError("successful tool results cannot have an error_code")
         if not self.ok and (
-            not self.error_code or not self.error_code.strip()
+            not isinstance(self.error_code, str) or not self.error_code.strip()
         ):
             raise DomainValidationError("failed tool results require an error_code")
+        if not isinstance(self.metadata, Mapping):
+            raise DomainValidationError("tool result metadata must be a mapping")
+        if not isinstance(self.model_metadata, Mapping):
+            raise DomainValidationError("tool result model_metadata must be a mapping")
+        model_metadata = dict(self.model_metadata)
+        try:
+            json.dumps(model_metadata, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise DomainValidationError(
+                "tool result model_metadata must contain finite JSON values"
+            ) from exc
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        object.__setattr__(
+            self,
+            "model_metadata",
+            MappingProxyType(model_metadata),
+        )
 
     def model_content(self) -> str:
         """Return a deterministic provider-neutral envelope for a tool message."""
@@ -159,9 +182,12 @@ class ToolResult:
                 "ok": self.ok,
                 "content": self.content,
                 "error_code": self.error_code,
+                "metadata": dict(self.model_metadata),
             },
+            allow_nan=False,
             ensure_ascii=False,
             separators=(",", ":"),
+            sort_keys=True,
         )
 
     def as_message(self) -> Message:

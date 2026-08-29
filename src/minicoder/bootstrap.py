@@ -38,6 +38,12 @@ from minicoder.tools.output import (
     StreamAwareOutputCompactor,
     ToolOutputArtifactStore,
 )
+from minicoder.tools.pipeline import (
+    ToolContractMiddleware,
+    ToolExceptionBoundary,
+    ToolPipeline,
+    ToolResultEnvelopeMiddleware,
+)
 from minicoder.tools.process import ReadToolOutputTool, RunCommandTool
 from minicoder.tools.registry import ToolRegistry
 from minicoder.tools.safety import WorkspacePathPolicy
@@ -142,16 +148,16 @@ class ApplicationFactory:
         return StreamAwareOutputCompactor()
 
     @staticmethod
-    def create_tool_registry(
+    def create_tool_pipeline(
         config: AppConfig,
         *,
         processes: ProcessPort,
         artifacts: ToolOutputArtifactStore,
     ) -> ToolPort:
-        """Create the workspace-scoped collection of local coding tools."""
+        """Create workspace tools and wrap their registry in shared policies."""
 
         paths = WorkspacePathPolicy(config.workspace)
-        return ToolRegistry(
+        registry = ToolRegistry(
             (
                 ListFilesTool(paths),
                 ReadFileTool(paths, max_chars=config.max_tool_output_chars),
@@ -172,6 +178,16 @@ class ApplicationFactory:
                     max_output_chars=config.max_tool_output_chars,
                 ),
             )
+        )
+        return ToolPipeline(
+            registry,
+            middleware=(
+                ToolExceptionBoundary(),
+                ToolResultEnvelopeMiddleware(
+                    max_model_chars=config.max_tool_output_chars,
+                ),
+                ToolContractMiddleware(),
+            ),
         )
 
     @staticmethod
@@ -200,7 +216,7 @@ class ApplicationFactory:
             max_read_chars=config.max_tool_output_chars // 2,
         )
         try:
-            tools = ApplicationFactory.create_tool_registry(
+            tools = ApplicationFactory.create_tool_pipeline(
                 config,
                 processes=processes,
                 artifacts=artifacts,
