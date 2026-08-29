@@ -142,6 +142,19 @@ def test_compactor_without_diagnostics_prefers_head_and_tail() -> None:
     assert "omitted" in compacted.content
 
 
+def test_compactor_without_diagnostics_uses_thirty_seventy_payload_split() -> None:
+    content = "H" * 2_000 + "T" * 2_000
+
+    compacted = DiagnosticOutputCompactor().compact(content, max_chars=1_000)
+
+    head, tail = compacted.included_ranges
+    head_chars = head.end - head.start
+    tail_chars = tail.end - tail.start
+    kept_chars = head_chars + tail_chars
+    assert head_chars * 10 == kept_chars * 3
+    assert tail_chars * 10 == kept_chars * 7
+
+
 @pytest.mark.parametrize(
     "diagnostic",
     [

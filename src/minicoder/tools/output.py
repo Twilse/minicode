@@ -26,6 +26,9 @@ _MAX_DIAGNOSTIC_PREFIX_CHARS = 1_000
 _MAX_DIAGNOSTIC_WINDOW_CHARS = 6_000
 _MAX_DIAGNOSTIC_RANGES = 5
 _COMPACTION_OVERHEAD_RESERVE = 240
+_DIAGNOSTIC_HEAD_PERCENT = 20
+_DIAGNOSTIC_CONTENT_PERCENT = 50
+_NO_DIAGNOSTIC_HEAD_PERCENT = 30
 
 
 class ArtifactStoreError(ValueError):
@@ -211,15 +214,24 @@ class DiagnosticOutputCompactor:
         payload_budget = max_chars - _COMPACTION_OVERHEAD_RESERVE
         diagnostics = _diagnostic_ranges(content)
         if diagnostics:
-            head_budget = max(1, payload_budget * 20 // 100)
-            diagnostic_budget = max(1, payload_budget * 50 // 100)
+            head_budget = max(
+                1,
+                payload_budget * _DIAGNOSTIC_HEAD_PERCENT // 100,
+            )
+            diagnostic_budget = max(
+                1,
+                payload_budget * _DIAGNOSTIC_CONTENT_PERCENT // 100,
+            )
             tail_budget = max(1, payload_budget - head_budget - diagnostic_budget)
             diagnostic_selection = _take_range_prefixes(
                 diagnostics,
                 diagnostic_budget,
             )
         else:
-            head_budget = max(1, payload_budget * 20 // 100)
+            head_budget = max(
+                1,
+                payload_budget * _NO_DIAGNOSTIC_HEAD_PERCENT // 100,
+            )
             tail_budget = max(1, payload_budget - head_budget)
             diagnostic_selection = ()
 
@@ -336,7 +348,7 @@ def _fallback_head_tail(content: str, max_chars: int) -> CompactedOutput:
         ranges = () if not preview else (CharacterRange(0, len(preview)),)
         return CompactedOutput(preview, original_chars, True, ranges)
 
-    head_chars = max(1, max_chars // 5)
+    head_chars = max(1, max_chars * _NO_DIAGNOSTIC_HEAD_PERCENT // 100)
     while True:
         marker = _omission_marker(head_chars, original_chars)
         tail_chars = max_chars - head_chars - len(marker)
