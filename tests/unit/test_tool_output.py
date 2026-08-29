@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 from pathlib import Path
 
 import pytest
 
+from minicoder.domain.models import ProcessResult
 from minicoder.tools.output import (
     ARTIFACT_NOT_FOUND,
     ARTIFACT_STORE_CLOSED,
     INVALID_ARTIFACT_RANGE,
     ArtifactStoreError,
+    CombinedOutputCompactor,
     DiagnosticOutputCompactor,
+    StreamAwareOutputCompactor,
     ToolOutputArtifactStore,
 )
 
@@ -204,3 +208,102 @@ def test_compactor_handles_one_million_characters_with_a_hard_budget() -> None:
     assert compacted.original_chars == len(content)
     assert compacted.truncated is True
     assert "ERROR middle" in compacted.content
+
+
+def test_combined_strategy_preserves_the_original_single_string_behavior() -> None:
+    result = ProcessResult(
+        stdout="HEAD" + "x" * 2_000,
+        stderr="fatal stderr tail\n",
+        exit_code=1,
+        timed_out=False,
+        duration_seconds=0.1,
+    )
+
+    compacted = CombinedOutputCompactor().compact(result, max_chars=400)
+
+    assert compacted.content.startswith("[stdout]\nHEAD")
+    assert len(compacted.content) <= 400
+    assert compacted.original_chars == len(result.combined_output())
+
+
+def test_stream_aware_compactor_keeps_both_labels_and_diagnostics() -> None:
+    result = ProcessResult(
+        stdout=(
+            "stdout head\n"
+            + "stdout noise\n" * 80
+            + "FAILED stdout test\n"
+            + "stdout tail\n" * 80
+        ),
+        stderr=(
+            "stderr head\n"
+            + "stderr noise\n" * 80
+            + "TypeError: stderr failure\n"
+            + "stderr tail\n" * 80
+        ),
+        exit_code=1,
+        timed_out=False,
+        duration_seconds=0.1,
+    )
+
+    compacted = StreamAwareOutputCompactor().compact(result, max_chars=1_500)
+
+    assert len(compacted.content) <= 1_500
+    assert compacted.content.startswith("[stdout]\n")
+    assert compacted.content.count("[stdout]") == 1
+    assert compacted.content.count("[stderr]") == 1
+    assert "FAILED stdout test" in compacted.content
+    assert "TypeError: stderr failure" in compacted.content
+    assert compacted.truncated is True
+    complete_output = result.combined_output()
+    stderr_label_start = complete_output.index("[stderr]")
+    assert any(
+        current.start <= stderr_label_start
+        and current.end >= stderr_label_start + len("[stderr]\n")
+        for current in compacted.included_ranges
+    )
+    for match in re.finditer(r"output chars (\d+):(\d+) omitted", compacted.content):
+        start, end = (int(value) for value in match.groups())
+        assert 0 <= start < end <= len(complete_output)
+
+
+def test_stream_aware_compactor_raises_stderr_share_for_failed_processes() -> None:
+    success = ProcessResult(
+        stdout="S" * 5_000,
+        stderr="E" * 5_000,
+        exit_code=0,
+        timed_out=False,
+        duration_seconds=0.1,
+    )
+    failure = ProcessResult(
+        stdout=success.stdout,
+        stderr=success.stderr,
+        exit_code=1,
+        timed_out=False,
+        duration_seconds=0.1,
+    )
+    compactor = StreamAwareOutputCompactor()
+
+    successful_preview = compactor.compact(success, max_chars=1_200).content
+    failed_preview = compactor.compact(failure, max_chars=1_200).content
+
+    assert successful_preview.count("S") > successful_preview.count("E")
+    assert failed_preview.count("E") > failed_preview.count("S")
+    assert "[stdout]" in failed_preview
+    assert "[stderr]" in failed_preview
+
+
+def test_stream_aware_compactor_reassigns_unused_short_stream_budget() -> None:
+    result = ProcessResult(
+        stdout="S" * 5_000,
+        stderr="fatal error\n",
+        exit_code=1,
+        timed_out=False,
+        duration_seconds=0.1,
+    )
+
+    compacted = StreamAwareOutputCompactor().compact(result, max_chars=1_000)
+
+    assert len(compacted.content) <= 1_000
+    assert "fatal error" in compacted.content
+    assert compacted.content.count("S") > 500
+    assert compacted.content.index("[stdout]") < compacted.content.index("[stderr]")

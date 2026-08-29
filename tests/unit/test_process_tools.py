@@ -8,7 +8,7 @@ import pytest
 
 from minicoder.domain.models import ProcessResult, ToolCall, ToolResult
 from minicoder.tools.command_safety import COMMAND_REJECTED, CommandSafetyPolicy
-from minicoder.tools.output import DiagnosticOutputCompactor, ToolOutputArtifactStore
+from minicoder.tools.output import StreamAwareOutputCompactor, ToolOutputArtifactStore
 from minicoder.tools.process import (
     COMMAND_FAILED,
     COMMAND_NOT_FOUND,
@@ -65,7 +65,7 @@ def _registry(
                 processes=process,
                 policy=CommandSafetyPolicy(python_executable="/runtime/python"),
                 artifacts=artifacts,
-                compactor=DiagnosticOutputCompactor(),
+                compactor=StreamAwareOutputCompactor(),
                 workspace=workspace,
                 timeout_seconds=3.5,
                 max_output_chars=max_output_chars,
@@ -248,6 +248,28 @@ def test_long_output_is_compacted_stored_and_read_back(tmp_path: Path) -> None:
         offset=0,
         limit=artifacts.max_read_chars,
     ).content == complete_output[:256]
+    artifacts.close()
+
+
+def test_long_dual_stream_output_keeps_both_channel_labels(tmp_path: Path) -> None:
+    process = RecordingProcessAdapter(
+        ProcessResult(
+            stdout="stdout start\n" + "stdout noise\n" * 200,
+            stderr="stderr start\n" + "stderr noise\n" * 200,
+            exit_code=1,
+            timed_out=False,
+            duration_seconds=2.0,
+        )
+    )
+    registry, artifacts = _registry(tmp_path, process)
+
+    result = _execute(registry, "run_command", {"argv": ["pytest", "-q"]})
+
+    assert result.error_code == COMMAND_FAILED
+    assert len(result.content) <= 512
+    assert result.content.count("[stdout]") == 1
+    assert result.content.count("[stderr]") == 1
+    assert result.metadata["truncated"] is True
     artifacts.close()
 
 

@@ -14,6 +14,7 @@ from minicoder.bootstrap import ApplicationFactory
 from minicoder.config import AppConfig
 from minicoder.domain.models import ToolCall
 from minicoder.platforms import OperatingSystem
+from minicoder.tools.output import StreamAwareOutputCompactor
 
 
 def test_factory_creates_validated_bootstrap_context(tmp_path: Path) -> None:
@@ -117,3 +118,9 @@ def test_factory_selects_platform_process_adapter(
     adapter = ApplicationFactory.create_process_adapter(operating_system)
 
     assert isinstance(adapter, expected_type)
+
+
+def test_factory_selects_stream_aware_output_compactor() -> None:
+    compactor = ApplicationFactory.create_output_compactor()
+
+    assert isinstance(compactor, StreamAwareOutputCompactor)

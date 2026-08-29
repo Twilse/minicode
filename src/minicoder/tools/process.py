@@ -272,7 +272,7 @@ def _format_process_output(
     seen_budgets: set[int] = set()
     while available not in seen_budgets:
         seen_budgets.add(available)
-        compacted = compactor.compact(complete_output, max_chars=available)
+        compacted = compactor.compact(result, max_chars=available)
         header = _status_header(
             result,
             truncated=True,
@@ -286,7 +286,7 @@ def _format_process_output(
         available = next_available
     else:
         available = min(available, next_available)
-        compacted = compactor.compact(complete_output, max_chars=available)
+        compacted = compactor.compact(result, max_chars=available)
         header = _status_header(
             result,
             truncated=True,

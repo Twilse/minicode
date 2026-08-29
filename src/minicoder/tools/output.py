@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from minicoder.domain.models import ProcessResult
+
 ARTIFACT_NOT_FOUND = "ARTIFACT_NOT_FOUND"
 ARTIFACT_STORE_CLOSED = "ARTIFACT_STORE_CLOSED"
 INVALID_ARTIFACT_RANGE = "INVALID_ARTIFACT_RANGE"
@@ -29,6 +31,14 @@ _COMPACTION_OVERHEAD_RESERVE = 240
 _DIAGNOSTIC_HEAD_PERCENT = 20
 _DIAGNOSTIC_CONTENT_PERCENT = 50
 _NO_DIAGNOSTIC_HEAD_PERCENT = 30
+_SUCCESS_STDOUT_PERCENT = 70  # stdout share when both long streams succeeded.
+_FAILURE_STDOUT_PERCENT = 40  # stdout share when the command failed or timed out.
+_STDOUT_LABEL = "[stdout]\n"
+_STDERR_LABEL = "[stderr]\n"
+_STREAM_SEPARATOR_RESERVE = 1
+_OMISSION_MARKER_PATTERN = re.compile(
+    r"(\.\.\.\[output chars )(\d+):(\d+)( omitted\]\.\.\.)"
+)
 
 
 class ArtifactStoreError(ValueError):
@@ -79,10 +89,17 @@ class CompactedOutput:
         return len(self.content)
 
 
-class OutputCompactionStrategy(Protocol):
-    """Select a bounded model-visible preview from complete tool output."""
+class TextCompactionStrategy(Protocol):
+    """Select a bounded preview from one text stream."""
 
     def compact(self, content: str, *, max_chars: int) -> CompactedOutput:
+        ...
+
+
+class OutputCompactionStrategy(Protocol):
+    """Select a bounded preview from structured child-process output."""
+
+    def compact(self, result: ProcessResult, *, max_chars: int) -> CompactedOutput:
         ...
 
 
@@ -193,7 +210,7 @@ class ToolOutputArtifactStore:
 
 
 class DiagnosticOutputCompactor:
-    """Preserve head, diagnostic line windows, and tail within a character budget."""
+    """Preserve one stream's head, diagnostic windows, and tail within a budget."""
 
     def compact(self, content: str, *, max_chars: int) -> CompactedOutput:
         if max_chars <= 0:
@@ -254,6 +271,266 @@ class DiagnosticOutputCompactor:
             truncated=True,
             included_ranges=selected,
         )
+
+
+class CombinedOutputCompactor:
+    """Legacy strategy that compacts stdout and stderr as one combined string."""
+
+    def __init__(
+        self,
+        text_compactor: TextCompactionStrategy | None = None,
+    ) -> None:
+        self._text_compactor = (
+            DiagnosticOutputCompactor()
+            if text_compactor is None
+            else text_compactor
+        )
+
+    def compact(self, result: ProcessResult, *, max_chars: int) -> CompactedOutput:
+        return self._text_compactor.compact(
+            result.combined_output(),
+            max_chars=max_chars,
+        )
+
+
+class StreamAwareOutputCompactor:
+    """Compact stdout and stderr independently before combining labeled previews."""
+
+    def __init__(
+        self,
+        text_compactor: TextCompactionStrategy | None = None,
+    ) -> None:
+        self._text_compactor = (
+            DiagnosticOutputCompactor()
+            if text_compactor is None
+            else text_compactor
+        )
+
+    def compact(self, result: ProcessResult, *, max_chars: int) -> CompactedOutput:
+        if max_chars <= 0:
+            raise ValueError("max_chars must be greater than zero")
+
+        complete_output = result.combined_output()
+        original_chars = len(complete_output)
+        if original_chars <= max_chars:
+            ranges = () if not complete_output else (CharacterRange(0, original_chars),)
+            return CompactedOutput(
+                content=complete_output,
+                original_chars=original_chars,
+                truncated=False,
+                included_ranges=ranges,
+            )
+
+        if not result.stdout or not result.stderr:
+            return self._text_compactor.compact(
+                complete_output,
+                max_chars=max_chars,
+            )
+
+        minimum_labeled_chars = (
+            len(_STDOUT_LABEL)
+            + len(_STDERR_LABEL)
+            + _STREAM_SEPARATOR_RESERVE
+            + 2
+        )
+        if max_chars < minimum_labeled_chars:
+            return self._text_compactor.compact(
+                complete_output,
+                max_chars=max_chars,
+            )
+
+        stdout_offset = len(_STDOUT_LABEL)
+        original_separator_chars = 0 if result.stdout.endswith("\n") else 1
+        stderr_label_start = (
+            stdout_offset + len(result.stdout) + original_separator_chars
+        )
+        stderr_offset = stderr_label_start + len(_STDERR_LABEL)
+        stream_budget = (
+            max_chars
+            - len(_STDOUT_LABEL)
+            - len(_STDERR_LABEL)
+            - _STREAM_SEPARATOR_RESERVE
+        )
+        stdout_percent = (
+            _FAILURE_STDOUT_PERCENT
+            if result.timed_out or result.exit_code != 0
+            else _SUCCESS_STDOUT_PERCENT
+        )
+
+        seen_budgets: set[int] = set()
+        while stream_budget >= 2 and stream_budget not in seen_budgets:
+            seen_budgets.add(stream_budget)
+            stdout_budget, stderr_budget = _allocate_stream_budgets(
+                total_budget=stream_budget,
+                stdout_chars=len(result.stdout),
+                stderr_chars=len(result.stderr),
+                stdout_percent=stdout_percent,
+            )
+            stdout_preview = self._text_compactor.compact(
+                result.stdout,
+                max_chars=stdout_budget,
+            )
+            stderr_preview = self._text_compactor.compact(
+                result.stderr,
+                max_chars=stderr_budget,
+            )
+            rendered_stdout = _shift_omission_markers(
+                stdout_preview.content,
+                stdout_offset,
+            )
+            rendered_stderr = _shift_omission_markers(
+                stderr_preview.content,
+                stderr_offset,
+            )
+            preview_separator = "" if rendered_stdout.endswith("\n") else "\n"
+            preview = (
+                f"{_STDOUT_LABEL}{rendered_stdout}{preview_separator}"
+                f"{_STDERR_LABEL}{rendered_stderr}"
+            )
+            if len(preview) <= max_chars:
+                included_ranges = _stream_included_ranges(
+                    stdout_preview=stdout_preview,
+                    stderr_preview=stderr_preview,
+                    stdout_offset=stdout_offset,
+                    stderr_label_start=stderr_label_start,
+                    stderr_offset=stderr_offset,
+                    include_original_separator=bool(
+                        original_separator_chars and preview_separator
+                    ),
+                )
+                return CompactedOutput(
+                    content=preview,
+                    original_chars=original_chars,
+                    truncated=True,
+                    included_ranges=included_ranges,
+                )
+            stream_budget -= max(1, len(preview) - max_chars)
+
+        return _minimal_labeled_stream_preview(
+            result,
+            stdout_offset=stdout_offset,
+            stderr_label_start=stderr_label_start,
+            stderr_offset=stderr_offset,
+            include_original_separator=bool(original_separator_chars),
+        )
+
+
+def _allocate_stream_budgets(
+    *,
+    total_budget: int,
+    stdout_chars: int,
+    stderr_chars: int,
+    stdout_percent: int,
+) -> tuple[int, int]:
+    if total_budget < 2 or stdout_chars <= 0 or stderr_chars <= 0:
+        raise ValueError("two non-empty streams require at least two budget characters")
+
+    stdout_target = max(1, total_budget * stdout_percent // 100)
+    stdout_target = min(stdout_target, total_budget - 1)
+    stderr_target = total_budget - stdout_target
+    stdout_budget = min(stdout_chars, stdout_target)
+    stderr_budget = min(stderr_chars, stderr_target)
+    remaining = total_budget - stdout_budget - stderr_budget
+
+    stdout_room = stdout_chars - stdout_budget
+    stdout_extra = min(stdout_room, remaining)
+    stdout_budget += stdout_extra
+    remaining -= stdout_extra
+
+    stderr_room = stderr_chars - stderr_budget
+    stderr_extra = min(stderr_room, remaining)
+    stderr_budget += stderr_extra
+    return stdout_budget, stderr_budget
+
+
+def _shift_omission_markers(content: str, offset: int) -> str:
+    def replace(match: re.Match[str]) -> str:
+        start = int(match.group(2)) + offset
+        end = int(match.group(3)) + offset
+        return f"{match.group(1)}{start}:{end}{match.group(4)}"
+
+    return _OMISSION_MARKER_PATTERN.sub(replace, content)
+
+
+def _stream_included_ranges(
+    *,
+    stdout_preview: CompactedOutput,
+    stderr_preview: CompactedOutput,
+    stdout_offset: int,
+    stderr_label_start: int,
+    stderr_offset: int,
+    include_original_separator: bool,
+) -> tuple[CharacterRange, ...]:
+    ranges: list[CharacterRange] = [CharacterRange(0, len(_STDOUT_LABEL))]
+    ranges.extend(
+        CharacterRange(
+            stdout_offset + current.start,
+            stdout_offset + current.end,
+        )
+        for current in stdout_preview.included_ranges
+    )
+    if include_original_separator:
+        ranges.append(CharacterRange(stderr_label_start - 1, stderr_label_start))
+    ranges.append(
+        CharacterRange(
+            stderr_label_start,
+            stderr_label_start + len(_STDERR_LABEL),
+        )
+    )
+    ranges.extend(
+        CharacterRange(
+            stderr_offset + current.start,
+            stderr_offset + current.end,
+        )
+        for current in stderr_preview.included_ranges
+    )
+    return _merge_ranges(ranges)
+
+
+def _minimal_labeled_stream_preview(
+    result: ProcessResult,
+    *,
+    stdout_offset: int,
+    stderr_label_start: int,
+    stderr_offset: int,
+    include_original_separator: bool,
+) -> CompactedOutput:
+    stdout_content = result.stdout[:1]
+    stderr_content = result.stderr[:1]
+    preview_separator = "" if stdout_content.endswith("\n") else "\n"
+    preview = (
+        f"{_STDOUT_LABEL}{stdout_content}{preview_separator}"
+        f"{_STDERR_LABEL}{stderr_content}"
+    )
+
+    stdout_preview = CompactedOutput(
+        stdout_content,
+        len(result.stdout),
+        True,
+        (CharacterRange(0, 1),),
+    )
+    stderr_preview = CompactedOutput(
+        stderr_content,
+        len(result.stderr),
+        True,
+        (CharacterRange(0, 1),),
+    )
+    included_ranges = _stream_included_ranges(
+        stdout_preview=stdout_preview,
+        stderr_preview=stderr_preview,
+        stdout_offset=stdout_offset,
+        stderr_label_start=stderr_label_start,
+        stderr_offset=stderr_offset,
+        include_original_separator=bool(
+            include_original_separator and preview_separator
+        ),
+    )
+    return CompactedOutput(
+        content=preview,
+        original_chars=len(result.combined_output()),
+        truncated=True,
+        included_ranges=included_ranges,
+    )
 
 
 def _diagnostic_ranges(content: str) -> tuple[CharacterRange, ...]:

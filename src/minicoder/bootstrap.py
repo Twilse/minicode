@@ -24,7 +24,11 @@ from minicoder.tools.files import (
     ReplaceTextTool,
     SearchTextTool,
 )
-from minicoder.tools.output import DiagnosticOutputCompactor, ToolOutputArtifactStore
+from minicoder.tools.output import (
+    OutputCompactionStrategy,
+    StreamAwareOutputCompactor,
+    ToolOutputArtifactStore,
+)
 from minicoder.tools.process import ReadToolOutputTool, RunCommandTool
 from minicoder.tools.registry import ToolRegistry
 from minicoder.tools.safety import WorkspacePathPolicy
@@ -79,6 +83,12 @@ class ApplicationFactory:
         return PosixSubprocessAdapter()
 
     @staticmethod
+    def create_output_compactor() -> OutputCompactionStrategy:
+        """Select the default process-output compaction strategy."""
+
+        return StreamAwareOutputCompactor()
+
+    @staticmethod
     def create_tool_registry(
         config: AppConfig,
         *,
@@ -111,7 +121,7 @@ class ApplicationFactory:
                     processes=processes,
                     policy=CommandSafetyPolicy(),
                     artifacts=artifacts,
-                    compactor=DiagnosticOutputCompactor(),
+                    compactor=ApplicationFactory.create_output_compactor(),
                     workspace=config.workspace,
                     timeout_seconds=config.command_timeout_seconds,
                     max_output_chars=config.max_tool_output_chars,
