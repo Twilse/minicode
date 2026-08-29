@@ -17,6 +17,10 @@ class ToolRegistrationError(MiniCoderError, ValueError):
     """Raised when a local tool cannot be safely added to the registry."""
 
 
+class AgentStateError(MiniCoderError, RuntimeError):
+    """Raised when the agent attempts an invalid state transition."""
+
+
 class UnsupportedPlatformError(ConfigurationError):
     """Raised when no safe process adapter exists for the current platform."""
 

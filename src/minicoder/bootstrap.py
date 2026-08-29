@@ -13,8 +13,10 @@ from minicoder.adapters.subprocess_runner import (
     PosixSubprocessAdapter,
     WindowsSubprocessAdapter,
 )
+from minicoder.application.agent_engine import AgentEngine
 from minicoder.application.ports import ModelPort, ProcessPort, ToolPort
 from minicoder.config import AppConfig
+from minicoder.domain.state import AgentRunResult
 from minicoder.platforms import OperatingSystem, detect_operating_system
 from minicoder.tools.command_safety import CommandSafetyPolicy
 from minicoder.tools.files import (
@@ -40,6 +42,42 @@ class BootstrapContext:
 
     config: AppConfig
     operating_system: OperatingSystem
+
+
+class AgentSession:
+    """Own one AgentEngine and close its task-scoped output artifacts exactly once."""
+
+    def __init__(
+        self,
+        *,
+        engine: AgentEngine,
+        artifacts: ToolOutputArtifactStore,
+    ) -> None:
+        self._engine = engine
+        self._artifacts = artifacts
+        self._closed = False
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def run(self, task: str) -> AgentRunResult:
+        """Run the session's single task and always release temporary artifacts."""
+
+        if self._closed:
+            raise RuntimeError("agent session is already closed")
+        try:
+            return self._engine.run(task)
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        """Idempotently invalidate output IDs and remove temporary files."""
+
+        if self._closed:
+            return
+        self._closed = True
+        self._artifacts.close()
 
 
 class ApplicationFactory:
@@ -92,24 +130,12 @@ class ApplicationFactory:
     def create_tool_registry(
         config: AppConfig,
         *,
-        operating_system: OperatingSystem | None = None,
-        process_adapter: ProcessPort | None = None,
+        processes: ProcessPort,
+        artifacts: ToolOutputArtifactStore,
     ) -> ToolPort:
         """Create the workspace-scoped collection of local coding tools."""
 
         paths = WorkspacePathPolicy(config.workspace)
-        if process_adapter is None:
-            selected_os = (
-                detect_operating_system()
-                if operating_system is None
-                else operating_system
-            )
-            processes = ApplicationFactory.create_process_adapter(selected_os)
-        else:
-            processes = process_adapter
-        artifacts = ToolOutputArtifactStore(
-            max_read_chars=config.max_tool_output_chars // 2,
-        )
         return ToolRegistry(
             (
                 ListFilesTool(paths),
@@ -132,3 +158,42 @@ class ApplicationFactory:
                 ),
             )
         )
+
+    @staticmethod
+    def create_agent_session(
+        context: BootstrapContext,
+        *,
+        model_adapter: ModelPort | None = None,
+        process_adapter: ProcessPort | None = None,
+    ) -> AgentSession:
+        """Assemble one task session while retaining ownership of its resources."""
+
+        config = context.config
+        model = (
+            ApplicationFactory.create_model_adapter(config)
+            if model_adapter is None
+            else model_adapter
+        )
+        processes = (
+            ApplicationFactory.create_process_adapter(context.operating_system)
+            if process_adapter is None
+            else process_adapter
+        )
+        artifacts = ToolOutputArtifactStore(
+            max_read_chars=config.max_tool_output_chars // 2,
+        )
+        try:
+            tools = ApplicationFactory.create_tool_registry(
+                config,
+                processes=processes,
+                artifacts=artifacts,
+            )
+            engine = AgentEngine(
+                model=model,
+                tools=tools,
+                max_steps=config.max_steps,
+            )
+        except Exception:
+            artifacts.close()
+            raise
+        return AgentSession(engine=engine, artifacts=artifacts)

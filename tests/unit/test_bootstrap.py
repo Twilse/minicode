@@ -12,9 +12,14 @@ from minicoder.adapters.subprocess_runner import (
 )
 from minicoder.bootstrap import ApplicationFactory
 from minicoder.config import AppConfig
-from minicoder.domain.models import ToolCall
+from minicoder.domain.models import AssistantTurn, ToolCall
+from minicoder.domain.state import AgentPhase
 from minicoder.platforms import OperatingSystem
-from minicoder.tools.output import StreamAwareOutputCompactor
+from minicoder.tools.output import (
+    StreamAwareOutputCompactor,
+    ToolOutputArtifactStore,
+)
+from tests.fakes import FakeModelAdapter
 
 
 def test_factory_creates_validated_bootstrap_context(tmp_path: Path) -> None:
@@ -76,15 +81,23 @@ def test_factory_builds_workspace_scoped_file_tools(tmp_path: Path) -> None:
         workspace=tmp_path,
     )
 
-    tools = ApplicationFactory.create_tool_registry(config)
-    definitions = tools.definitions()
-    result = tools.execute(
-        ToolCall(
-            id="call-create",
-            name="create_file",
-            arguments_json='{"path":"created.txt","content":"hello"}',
+    artifacts = ToolOutputArtifactStore(max_read_chars=256)
+    try:
+        tools = ApplicationFactory.create_tool_registry(
+            config,
+            processes=PosixSubprocessAdapter(),
+            artifacts=artifacts,
         )
-    )
+        definitions = tools.definitions()
+        result = tools.execute(
+            ToolCall(
+                id="call-create",
+                name="create_file",
+                arguments_json='{"path":"created.txt","content":"hello"}',
+            )
+        )
+    finally:
+        artifacts.close()
 
     assert [definition.name for definition in definitions] == [
         "list_files",
@@ -124,3 +137,29 @@ def test_factory_selects_stream_aware_output_compactor() -> None:
     compactor = ApplicationFactory.create_output_compactor()
 
     assert isinstance(compactor, StreamAwareOutputCompactor)
+
+
+def test_factory_creates_one_shot_agent_session_with_injected_adapters(
+    tmp_path: Path,
+) -> None:
+    context = ApplicationFactory.create_bootstrap_context(
+        environ={
+            "MINICODER_API_KEY": "not-used",
+            "MINICODER_BASE_URL": "https://models.example.com/v1",
+            "MINICODER_MODEL": "not-used",
+        },
+        workspace=tmp_path,
+        platform_name="darwin",
+    )
+    model = FakeModelAdapter([AssistantTurn(content="done")])
+    session = ApplicationFactory.create_agent_session(
+        context,
+        model_adapter=model,
+        process_adapter=PosixSubprocessAdapter(),
+    )
+
+    result = session.run("Inspect the workspace")
+
+    assert result.phase is AgentPhase.COMPLETE
+    assert result.final_response == "done"
+    assert session.closed is True

@@ -27,6 +27,22 @@ def test_assistant_turn_converts_to_history_message() -> None:
     assert message.tool_calls == (call,)
 
 
+@pytest.mark.parametrize("content", [None, "", "   ", "\t\n"])
+def test_assistant_turn_without_tools_requires_final_text(
+    content: str | None,
+) -> None:
+    with pytest.raises(DomainValidationError, match="non-blank content"):
+        AssistantTurn(content=content)
+
+
+def test_assistant_turn_only_keeps_reasoning_for_tool_continuation() -> None:
+    with pytest.raises(DomainValidationError, match="tool-calling turn"):
+        AssistantTurn(
+            content="final answer",
+            reasoning_content="provider continuation state",
+        )
+
+
 def test_tool_result_converts_to_correlated_tool_message() -> None:
     result = ToolResult(
         call_id="call-1",

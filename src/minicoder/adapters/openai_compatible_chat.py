@@ -160,8 +160,10 @@ def _parse_response(response: Any) -> AssistantTurn:
 
     raw_tool_calls = getattr(message, "tool_calls", None) or ()
     tool_calls = tuple(_parse_tool_call(raw_call) for raw_call in raw_tool_calls)
-    if content is None and not tool_calls:
-        raise ModelResponseError("model response contained neither content nor tool calls")
+    if not tool_calls and (content is None or not content.strip()):
+        raise ModelResponseError(
+            "model response contained neither final text nor tool calls"
+        )
 
     raw_reasoning = getattr(message, "reasoning_content", None)
     if raw_reasoning is not None and not isinstance(raw_reasoning, str):

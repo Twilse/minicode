@@ -1,5 +1,6 @@
 """Reusable test adapters for deterministic integration tests."""
 
 from tests.fakes.model import FakeModelAdapter, RecordedModelRequest
+from tests.fakes.tools import FakeToolAdapter
 
-__all__ = ["FakeModelAdapter", "RecordedModelRequest"]
+__all__ = ["FakeModelAdapter", "FakeToolAdapter", "RecordedModelRequest"]

@@ -170,6 +170,7 @@ def test_adapter_replays_reasoning_only_for_assistant_tool_call_messages() -> No
     [
         SimpleNamespace(choices=[]),
         _response(content=None),
+        _response(content="   "),
         _response(
             content=None,
             tool_calls=[SimpleNamespace(type="custom")],

@@ -100,6 +100,22 @@ class AssistantTurn:
     tool_calls: tuple[ToolCall, ...] = ()  # Local tool invocations requested this turn.
     reasoning_content: str | None = None  # Optional model reasoning kept with the turn.
 
+    def __post_init__(self) -> None:
+        if self.content is not None and not isinstance(self.content, str):
+            raise DomainValidationError("assistant turn content must be text or None")
+        if not self.tool_calls and (
+            self.content is None or not self.content.strip()
+        ):
+            raise DomainValidationError(
+                "assistant turns without tool calls require non-blank content"
+            )
+        if self.reasoning_content is not None and (
+            not isinstance(self.reasoning_content, str) or not self.tool_calls
+        ):
+            raise DomainValidationError(
+                "assistant reasoning_content requires a tool-calling turn"
+            )
+
     def as_message(self) -> Message:
         """Convert the turn into the assistant message stored in history."""
 
