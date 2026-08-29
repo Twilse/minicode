@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
@@ -14,7 +15,13 @@ from minicoder.adapters.subprocess_runner import (
     WindowsSubprocessAdapter,
 )
 from minicoder.application.agent_engine import AgentEngine
-from minicoder.application.ports import ModelPort, ProcessPort, ToolPort
+from minicoder.application.event_bus import EventBus, EventDeliveryFailure
+from minicoder.application.ports import (
+    EventSinkPort,
+    ModelPort,
+    ProcessPort,
+    ToolPort,
+)
 from minicoder.config import AppConfig
 from minicoder.domain.state import AgentRunResult
 from minicoder.platforms import OperatingSystem, detect_operating_system
@@ -45,21 +52,29 @@ class BootstrapContext:
 
 
 class AgentSession:
-    """Own one AgentEngine and close its task-scoped output artifacts exactly once."""
+    """Own one engine, close task artifacts, and expose observer failures."""
 
     def __init__(
         self,
         *,
         engine: AgentEngine,
         artifacts: ToolOutputArtifactStore,
+        events: EventBus,
     ) -> None:
         self._engine = engine
         self._artifacts = artifacts
+        self._events = events
         self._closed = False
 
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def event_failures(self) -> tuple[EventDeliveryFailure, ...]:
+        """Expose non-fatal observer errors after or during the task."""
+
+        return self._events.failures
 
     def run(self, task: str) -> AgentRunResult:
         """Run the session's single task and always release temporary artifacts."""
@@ -165,6 +180,7 @@ class ApplicationFactory:
         *,
         model_adapter: ModelPort | None = None,
         process_adapter: ProcessPort | None = None,
+        event_sinks: Sequence[EventSinkPort] = (),
     ) -> AgentSession:
         """Assemble one task session while retaining ownership of its resources."""
 
@@ -179,6 +195,7 @@ class ApplicationFactory:
             if process_adapter is None
             else process_adapter
         )
+        events = EventBus(event_sinks)
         artifacts = ToolOutputArtifactStore(
             max_read_chars=config.max_tool_output_chars // 2,
         )
@@ -192,8 +209,9 @@ class ApplicationFactory:
                 model=model,
                 tools=tools,
                 max_steps=config.max_steps,
+                events=events,
             )
         except Exception:
             artifacts.close()
             raise
-        return AgentSession(engine=engine, artifacts=artifacts)
+        return AgentSession(engine=engine, artifacts=artifacts, events=events)

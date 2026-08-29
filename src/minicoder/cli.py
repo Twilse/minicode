@@ -8,8 +8,12 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Mapping, TextIO
 
+from minicoder.adapters.console import ConsoleEventSink
+from minicoder.adapters.jsonl_trace import JsonlTraceSink
+from minicoder.application.ports import EventSinkPort
 from minicoder.bootstrap import ApplicationFactory, BootstrapContext
 from minicoder.domain.errors import MiniCoderError
+from minicoder.domain.state import AgentPhase
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,6 +32,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="validate startup configuration without calling a model",
     )
+    parser.add_argument(
+        "--trace",
+        type=Path,
+        default=None,
+        help="append sanitized agent events to this JSONL file",
+    )
+    parser.add_argument(
+        "task",
+        nargs="?",
+        help="one coding task for the agent to complete",
+    )
     return parser
 
 
@@ -45,7 +60,7 @@ def main(
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if not args.check_config:
+    if not args.check_config and args.task is None:
         parser.print_help(file=output)
         return 0
 
@@ -58,8 +73,43 @@ def main(
         print(f"configuration error: {exc}", file=error_output)
         return 2
 
-    print(_configuration_summary(context), file=output)
-    return 0
+    if args.check_config:
+        print(_configuration_summary(context), file=output)
+        return 0
+
+    event_sinks: list[EventSinkPort] = [ConsoleEventSink(output)]
+    if args.trace is not None:
+        try:
+            event_sinks.append(JsonlTraceSink(args.trace))
+        except ValueError as exc:
+            print(f"trace error: {exc}", file=error_output)
+            return 2
+
+    try:
+        assert args.task is not None
+        session = ApplicationFactory.create_agent_session(
+            context,
+            event_sinks=event_sinks,
+        )
+        result = session.run(args.task)
+    except KeyboardInterrupt:
+        print("agent interrupted by user", file=error_output)
+        return 130
+    except MiniCoderError as exc:
+        print(f"agent error: {exc}", file=error_output)
+        return 1
+
+    for failure in session.event_failures:
+        print(
+            f"event sink warning: {failure.sink_type}: {failure.message}",
+            file=error_output,
+        )
+
+    if result.phase is AgentPhase.COMPLETE:
+        print(result.final_response, file=output)
+        return 0
+    print(f"agent failed: {result.failure_message}", file=error_output)
+    return 1
 
 
 def _configuration_summary(context: BootstrapContext) -> str:

@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
+from minicoder.domain.events import AgentEvent
 from minicoder.domain.models import (
     AssistantTurn,
     Message,
@@ -14,6 +15,15 @@ from minicoder.domain.models import (
     ToolDefinition,
     ToolResult,
 )
+
+
+class EventSinkPort(Protocol):
+    """Consume one audit event without influencing agent decisions."""
+
+    def handle(self, event: AgentEvent) -> None:
+        """Render or persist one already-sanitized event."""
+
+        ...
 
 
 class ModelPort(Protocol):

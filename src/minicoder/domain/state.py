@@ -25,6 +25,7 @@ class AgentStopReason(str, Enum):
     FINAL_RESPONSE = "final_response"
     MAX_STEPS = "max_steps"
     MODEL_ERROR = "model_error"
+    USER_INTERRUPTED = "user_interrupted"
 
 
 @dataclass(frozen=True, slots=True)

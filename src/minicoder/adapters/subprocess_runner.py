@@ -43,6 +43,13 @@ class _SubprocessAdapter:
             timed_out = True
             self._terminate_process_tree(process)
             stdout_bytes, stderr_bytes = process.communicate()
+        except KeyboardInterrupt:
+            try:
+                self._terminate_process_tree(process)
+                process.communicate()
+            except Exception:
+                pass
+            raise
 
         duration = max(0.0, time.monotonic() - started_at)
         return ProcessResult(

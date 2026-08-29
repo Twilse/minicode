@@ -6,6 +6,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from minicoder.adapters.subprocess_runner import (
     PosixSubprocessAdapter,
     WindowsSubprocessAdapter,
@@ -103,3 +105,38 @@ def test_windows_adapter_requests_a_new_process_group() -> None:
     assert adapter._platform_options() == {
         "creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     }
+
+
+def test_adapter_terminates_process_tree_when_user_interrupts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InterruptingProcess:
+        def __init__(self) -> None:
+            self.communicate_calls = 0
+
+        def communicate(self, **_: object) -> tuple[bytes, bytes]:
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                raise KeyboardInterrupt
+            return b"", b""
+
+    process = InterruptingProcess()
+    terminated: list[object] = []
+    adapter = PosixSubprocessAdapter()
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(
+        adapter,
+        "_terminate_process_tree",
+        lambda selected: terminated.append(selected),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        adapter.run(
+            argv=(sys.executable, "-c", "print('not executed by fake')"),
+            cwd=tmp_path,
+            timeout_seconds=5.0,
+        )
+
+    assert terminated == [process]
+    assert process.communicate_calls == 2

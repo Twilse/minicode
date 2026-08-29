@@ -2,9 +2,10 @@ from pathlib import Path
 
 from minicoder.adapters.subprocess_runner import PosixSubprocessAdapter
 from minicoder.bootstrap import ApplicationFactory
+from minicoder.domain.events import AgentEventKind
 from minicoder.domain.models import AssistantTurn, MessageRole, ToolCall
 from minicoder.domain.state import AgentPhase, AgentStopReason
-from tests.fakes import FakeModelAdapter
+from tests.fakes import FakeModelAdapter, MemoryEventSink
 
 
 def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
@@ -31,10 +32,12 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
             AssistantTurn(content="Created and verified the requested file."),
         ]
     )
+    events = MemoryEventSink()
     session = ApplicationFactory.create_agent_session(
         context,
         model_adapter=model,
         process_adapter=PosixSubprocessAdapter(),
+        event_sinks=(events,),
     )
 
     result = session.run("Create created_by_agent.txt")
@@ -52,3 +55,11 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
         MessageRole.TOOL,
     ]
     assert session.closed is True
+    assert [event.kind for event in events.events] == [
+        AgentEventKind.TASK_STARTED,
+        AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.TOOL_CALLED,
+        AgentEventKind.TOOL_FINISHED,
+        AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.TASK_COMPLETED,
+    ]

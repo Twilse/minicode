@@ -1,7 +1,11 @@
 import json
 
+import pytest
+
 from minicoder.application.agent_engine import AgentEngine
+from minicoder.application.event_bus import EventBus
 from minicoder.domain.errors import ModelConnectionError
+from minicoder.domain.events import AgentEventKind
 from minicoder.domain.models import (
     AssistantTurn,
     MessageRole,
@@ -10,7 +14,7 @@ from minicoder.domain.models import (
     ToolResult,
 )
 from minicoder.domain.state import AgentPhase, AgentStopReason
-from tests.fakes import FakeModelAdapter, FakeToolAdapter
+from tests.fakes import FakeModelAdapter, FakeToolAdapter, MemoryEventSink
 
 
 def _definition(name: str = "read_file") -> ToolDefinition:
@@ -186,3 +190,76 @@ def test_engine_turns_expected_model_errors_into_a_failed_result() -> None:
         MessageRole.SYSTEM,
         MessageRole.USER,
     ]
+
+
+def test_engine_publishes_a_deterministic_model_tool_model_event_sequence() -> None:
+    call = ToolCall(id="call-read", name="read_file", arguments_json="{}")
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(content=None, tool_calls=(call,)),
+            AssistantTurn(content="done"),
+        ]
+    )
+    tools = FakeToolAdapter(
+        [
+            ToolResult(
+                call_id=call.id,
+                tool_name=call.name,
+                ok=True,
+                content="file contents that are not copied into events",
+            )
+        ],
+        definitions=(_definition(),),
+    )
+    events = MemoryEventSink()
+    engine = AgentEngine(
+        model=model,
+        tools=tools,
+        max_steps=3,
+        events=EventBus((events,), run_id="run-engine"),
+    )
+
+    result = engine.run("Read one file")
+
+    assert result.phase is AgentPhase.COMPLETE
+    assert [event.kind for event in events.events] == [
+        AgentEventKind.TASK_STARTED,
+        AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.TOOL_CALLED,
+        AgentEventKind.TOOL_FINISHED,
+        AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.TASK_COMPLETED,
+    ]
+    assert [event.sequence for event in events.events] == [1, 2, 3, 4, 5, 6]
+    assert events.events[3].details == {
+        "call_id": "call-read",
+        "tool_name": "read_file",
+        "ok": True,
+        "error_code": None,
+        "content_chars": 45,
+    }
+    assert events.events[-1].details == {"response_chars": 4}
+
+
+def test_engine_records_user_interruption_and_preserves_keyboard_interrupt() -> None:
+    class InterruptingModel:
+        def complete(self, **_: object) -> AssistantTurn:
+            raise KeyboardInterrupt
+
+    events = MemoryEventSink()
+    engine = AgentEngine(
+        model=InterruptingModel(),
+        tools=FakeToolAdapter(),
+        max_steps=3,
+        events=EventBus((events,), run_id="run-interrupt"),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        engine.run("Wait for the model")
+
+    assert [event.kind for event in events.events] == [
+        AgentEventKind.TASK_STARTED,
+        AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.TASK_FAILED,
+    ]
+    assert events.events[-1].details["reason"] == "user_interrupted"

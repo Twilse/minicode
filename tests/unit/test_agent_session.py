@@ -3,6 +3,8 @@ from pathlib import Path
 import pytest
 
 from minicoder.application.agent_engine import AgentEngine
+from minicoder.application.event_bus import EventBus
+from minicoder.domain.events import AgentEvent
 from minicoder.bootstrap import AgentSession
 from minicoder.domain.models import AssistantTurn
 from minicoder.domain.state import AgentPhase
@@ -18,12 +20,17 @@ def _session(tmp_path: Path, model: FakeModelAdapter) -> tuple[
         max_read_chars=100,
         temporary_parent=tmp_path,
     )
+    events = EventBus()
     engine = AgentEngine(
         model=model,
         tools=FakeToolAdapter(),
         max_steps=2,
+        events=events,
     )
-    return AgentSession(engine=engine, artifacts=artifacts), artifacts
+    return (
+        AgentSession(engine=engine, artifacts=artifacts, events=events),
+        artifacts,
+    )
 
 
 def test_session_closes_artifacts_after_a_completed_task(tmp_path: Path) -> None:
@@ -51,3 +58,29 @@ def test_session_closes_artifacts_after_an_unexpected_error(tmp_path: Path) -> N
 
     assert session.closed is True
     assert not root.exists()
+
+
+def test_session_exposes_non_fatal_event_sink_failures(tmp_path: Path) -> None:
+    class FailingSink:
+        def handle(self, event: AgentEvent) -> None:
+            raise OSError(f"trace failed at {event.sequence}")
+
+    artifacts = ToolOutputArtifactStore(
+        max_read_chars=100,
+        temporary_parent=tmp_path,
+    )
+    events = EventBus((FailingSink(),))
+    engine = AgentEngine(
+        model=FakeModelAdapter([AssistantTurn(content="done")]),
+        tools=FakeToolAdapter(),
+        max_steps=2,
+        events=events,
+    )
+    session = AgentSession(engine=engine, artifacts=artifacts, events=events)
+
+    result = session.run("Complete despite the broken trace sink")
+
+    assert result.phase is AgentPhase.COMPLETE
+    assert len(session.event_failures) == 3
+    assert {failure.event_sequence for failure in session.event_failures} == {1, 2, 3}
+    assert all(failure.sink_type == "FailingSink" for failure in session.event_failures)
