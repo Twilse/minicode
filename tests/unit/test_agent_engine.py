@@ -6,10 +6,15 @@ from minicoder.application.agent_engine import AgentEngine
 from minicoder.application.context import ContextManager, conversation_char_count
 from minicoder.application.event_bus import EventBus
 from minicoder.application.retry import ExponentialBackoffRetryStrategy
-from minicoder.domain.errors import ModelConnectionError, ModelServiceError
+from minicoder.domain.errors import (
+    DomainValidationError,
+    ModelConnectionError,
+    ModelServiceError,
+)
 from minicoder.domain.events import AgentEventKind
 from minicoder.domain.models import (
     AssistantTurn,
+    Message,
     MessageRole,
     ToolCall,
     ToolDefinition,
@@ -44,6 +49,82 @@ def test_engine_completes_after_one_final_model_turn() -> None:
         MessageRole.ASSISTANT,
     ]
     assert model.requests[0].tools == (_definition(),)
+
+
+def test_engine_runs_multiple_user_turns_with_shared_history_and_fresh_steps() -> None:
+    first_call = ToolCall(id="call-first", name="read_file", arguments_json="{}")
+    second_call = ToolCall(id="call-second", name="read_file", arguments_json="{}")
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(content=None, tool_calls=(first_call,)),
+            AssistantTurn(
+                content="The file uses Python.",
+                reasoning_content="first turn continuation state",
+            ),
+            AssistantTurn(content=None, tool_calls=(second_call,)),
+            AssistantTurn(content="It requires Python 3.11."),
+        ]
+    )
+    tools = FakeToolAdapter(
+        [
+            ToolResult(
+                call_id=first_call.id,
+                tool_name=first_call.name,
+                ok=True,
+                content="requires-python = '>=3.11'",
+            ),
+            ToolResult(
+                call_id=second_call.id,
+                tool_name=second_call.name,
+                ok=True,
+                content="requires-python = '>=3.11'",
+            ),
+        ],
+        definitions=(_definition(),),
+    )
+    engine = AgentEngine(model=model, tools=tools, max_steps=2)
+
+    first = engine.run_turn("Which language does this project use?")
+    second = engine.run_turn(
+        "What is its minimum version?",
+        history=first.messages,
+    )
+
+    assert first.model_steps == 2
+    assert second.model_steps == 2
+    assert second.final_response == "It requires Python 3.11."
+    second_turn_request = model.requests[2].messages
+    assert [message.role for message in second_turn_request] == [
+        MessageRole.SYSTEM,
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+        MessageRole.ASSISTANT,
+        MessageRole.USER,
+    ]
+    assert second_turn_request[-2].reasoning_content == (
+        "first turn continuation state"
+    )
+    assert second_turn_request[-1].content == "What is its minimum version?"
+    assert sum(
+        message.role is MessageRole.SYSTEM for message in second.messages
+    ) == 1
+
+
+def test_engine_rejects_history_from_a_different_system_prompt() -> None:
+    engine = AgentEngine(
+        model=FakeModelAdapter([AssistantTurn(content="unused")]),
+        tools=FakeToolAdapter(),
+        max_steps=2,
+    )
+
+    with pytest.raises(DomainValidationError, match="system prompt"):
+        engine.run_turn(
+            "Continue",
+            history=(
+                Message(role=MessageRole.SYSTEM, content="Different instructions"),
+            ),
+        )
 
 
 def test_engine_returns_tool_results_and_reasoning_to_the_next_model_turn() -> None:

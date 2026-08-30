@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from minicoder.application.completion import (
     CompletionPolicy,
     EvidenceBasedCompletionPolicy,
@@ -76,21 +78,42 @@ class AgentEngine:
     def run(self, task: str) -> AgentRunResult:
         """Run one fresh task until final text, model failure, or the step limit."""
 
-        if not isinstance(task, str) or not task.strip():
+        self._completion.reset()
+        return self._run_turn(task, history=())
+
+    def run_turn(
+        self,
+        user_message: str,
+        *,
+        history: Sequence[Message] = (),
+    ) -> AgentRunResult:
+        """Run one user turn while preserving an existing conversation history."""
+
+        history_snapshot = tuple(history)
+        if not history_snapshot:
+            self._completion.reset()
+        return self._run_turn(user_message, history=history_snapshot)
+
+    def _run_turn(
+        self,
+        user_message: str,
+        *,
+        history: tuple[Message, ...],
+    ) -> AgentRunResult:
+        if not isinstance(user_message, str) or not user_message.strip():
             raise DomainValidationError("agent task must be non-blank text")
 
-        self._completion.reset()
-        messages = [
-            Message(role=MessageRole.SYSTEM, content=self._system_prompt),
-            Message(role=MessageRole.USER, content=task),
-        ]
+        messages = list(self._validated_history(history))
+        current_user_index = len(messages)
+        messages.append(Message(role=MessageRole.USER, content=user_message))
         definitions = tuple(self._tools.definitions())
         state = AgentStateMachine(max_steps=self._max_steps)
         self._events.publish(
             AgentEventKind.TASK_STARTED,
             model_step=0,
             details={
-                "task_chars": len(task),
+                "task_chars": len(user_message),
+                "history_message_count": len(history),
                 "max_steps": self._max_steps,
                 "tool_count": len(definitions),
             },
@@ -123,7 +146,10 @@ class AgentEngine:
                 )
 
             state.begin_model_call()
-            window = self._context.prepare(messages)
+            window = self._context.prepare(
+                messages,
+                current_user_index=current_user_index,
+            )
             if window.compacted:
                 self._events.publish(
                     AgentEventKind.CONTEXT_COMPACTED,
@@ -254,6 +280,30 @@ class AgentEngine:
                 messages=tuple(messages),
                 final_response=turn.content,
             )
+
+    def _validated_history(
+        self,
+        history: tuple[Message, ...],
+    ) -> tuple[Message, ...]:
+        if not history:
+            return (
+                Message(role=MessageRole.SYSTEM, content=self._system_prompt),
+            )
+        if any(not isinstance(message, Message) for message in history):
+            raise DomainValidationError("agent history must contain Message values")
+        first = history[0]
+        if (
+            first.role is not MessageRole.SYSTEM
+            or first.content != self._system_prompt
+        ):
+            raise DomainValidationError(
+                "agent history must start with this engine's system prompt"
+            )
+        if any(message.role is MessageRole.SYSTEM for message in history[1:]):
+            raise DomainValidationError(
+                "agent history may contain only one system message"
+            )
+        return history
 
     def _record_user_interruption(self, state: AgentStateMachine) -> None:
         state.fail()

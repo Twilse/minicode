@@ -121,8 +121,8 @@ def _serialize_message(message: Message) -> dict[str, Any]:
                 }
                 for call in message.tool_calls
             ]
-            if message.reasoning_content is not None:
-                payload["reasoning_content"] = message.reasoning_content
+        if message.reasoning_content is not None:
+            payload["reasoning_content"] = message.reasoning_content
         return payload
 
     if message.content is None:
@@ -174,7 +174,7 @@ def _parse_response(response: Any) -> AssistantTurn:
     return AssistantTurn(
         content=content,
         tool_calls=tool_calls,
-        reasoning_content=raw_reasoning if tool_calls else None,
+        reasoning_content=raw_reasoning,
     )
 
 

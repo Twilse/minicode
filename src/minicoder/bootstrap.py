@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
 from typing import Mapping
 
 from openai import OpenAI
@@ -32,6 +33,7 @@ from minicoder.application.retry import (
     RetryStrategy,
 )
 from minicoder.config import AppConfig
+from minicoder.domain.models import Message
 from minicoder.domain.state import AgentRunResult
 from minicoder.platforms import OperatingSystem, detect_operating_system
 from minicoder.tools.command_safety import CommandSafetyPolicy
@@ -61,7 +63,7 @@ class BootstrapContext:
 
 
 class AgentSession:
-    """Own one engine, close task artifacts, and expose observer failures."""
+    """Own one multi-turn engine, its history, artifacts, and observer failures."""
 
     def __init__(
         self,
@@ -73,6 +75,7 @@ class AgentSession:
         self._engine = engine
         self._artifacts = artifacts
         self._events = events
+        self._history: tuple[Message, ...] = ()
         self._closed = False
 
     @property
@@ -85,15 +88,44 @@ class AgentSession:
 
         return self._events.failures
 
-    def run(self, task: str) -> AgentRunResult:
-        """Run the session's single task and always release temporary artifacts."""
+    @property
+    def history(self) -> tuple[Message, ...]:
+        """Return the immutable full conversation accumulated so far."""
+
+        return self._history
+
+    def submit(self, user_message: str) -> AgentRunResult:
+        """Run one user turn without closing the shared session resources."""
 
         if self._closed:
             raise RuntimeError("agent session is already closed")
+        result = self._engine.run_turn(
+            user_message,
+            history=self._history,
+        )
+        self._history = result.messages
+        return result
+
+    def run(self, task: str) -> AgentRunResult:
+        """Run one turn and always release resources for one-shot callers."""
+
         try:
-            return self._engine.run(task)
+            return self.submit(task)
         finally:
             self.close()
+
+    def __enter__(self) -> AgentSession:
+        if self._closed:
+            raise RuntimeError("agent session is already closed")
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.close()
 
     def close(self) -> None:
         """Idempotently invalidate output IDs and remove temporary files."""

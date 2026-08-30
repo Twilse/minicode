@@ -58,8 +58,14 @@ class DeterministicContextSummary:
         modified_files: list[str] = []
         failures: list[str] = []
         findings: list[str] = []
+        user_requests: list[str] = []
 
         for message in messages:
+            if message.role is MessageRole.USER:
+                if message.content and message.content.strip():
+                    user_requests.append(_one_line(message.content, 120))
+                continue
+
             if message.role is MessageRole.ASSISTANT:
                 if message.content and message.content.strip():
                     findings.append(f"assistant: {_one_line(message.content, 120)}")
@@ -98,6 +104,7 @@ class DeterministicContextSummary:
                 findings.append(f"{name}: {_one_line(content, 120)}")
 
         lines = [
+            _summary_line("Earlier user requests", user_requests[-4:], limit=4),
             f"Removed messages: {len(messages)}.",
             _summary_line("Tool activity", actions, limit=8),
             _summary_line("Modified files", _unique(modified_files), limit=8),
@@ -135,7 +142,12 @@ class ContextManager:
     def budget_chars(self) -> int:
         return self._budget_chars
 
-    def prepare(self, messages: Sequence[Message]) -> ContextWindow:
+    def prepare(
+        self,
+        messages: Sequence[Message],
+        *,
+        current_user_index: int | None = None,
+    ) -> ContextWindow:
         """Return one bounded snapshot while retaining the full input elsewhere."""
 
         original = tuple(messages)
@@ -145,8 +157,30 @@ class ContextManager:
             )
         if original[0].role is not MessageRole.SYSTEM:
             raise DomainValidationError("context first message must be system")
-        if original[1].role is not MessageRole.USER:
-            raise DomainValidationError("context second message must be user")
+        if any(message.role is MessageRole.SYSTEM for message in original[1:]):
+            raise DomainValidationError(
+                "context may contain only one system message"
+            )
+
+        if current_user_index is None:
+            user_indexes = tuple(
+                index
+                for index, message in enumerate(original)
+                if message.role is MessageRole.USER
+            )
+            if not user_indexes:
+                raise DomainValidationError("context requires a user message")
+            current_user_index = user_indexes[-1]
+        if (
+            not isinstance(current_user_index, int)
+            or isinstance(current_user_index, bool)
+            or current_user_index <= 0
+            or current_user_index >= len(original)
+            or original[current_user_index].role is not MessageRole.USER
+        ):
+            raise DomainValidationError(
+                "context current_user_index must identify a user message"
+            )
 
         original_chars = conversation_char_count(original)
         if original_chars <= self._budget_chars:
@@ -157,35 +191,64 @@ class ContextManager:
                 prepared_chars=original_chars,
             )
 
-        permanent = original[:2]
-        groups = _conversation_groups(original[2:])
+        system = original[0]
+        current_user = original[current_user_index]
+        before_groups = _conversation_groups(original[1:current_user_index])
+        after_groups = _conversation_groups(original[current_user_index + 1 :])
         summary_reserve = min(1_200, max(160, self._budget_chars // 5))
         recent_budget = max(
             0,
             self._budget_chars
-            - conversation_char_count(permanent)
+            - conversation_char_count((system, current_user))
             - len(_SUMMARY_HEADING)
             - summary_reserve,
         )
-        recent_groups = _select_recent_groups(groups, recent_budget)
-        omitted_groups = groups[: len(groups) - len(recent_groups)]
-        omitted = tuple(message for group in omitted_groups for message in group)
-        recent = tuple(message for group in recent_groups for message in group)
+        recent_after = _select_recent_groups(
+            after_groups,
+            recent_budget,
+            keep_latest=True,
+        )
+        remaining_budget = max(
+            0,
+            recent_budget
+            - conversation_char_count(
+                tuple(message for group in recent_after for message in group)
+            ),
+        )
+        recent_before = _select_recent_groups(
+            before_groups,
+            remaining_budget,
+            keep_latest=False,
+        )
+        omitted_before = before_groups[: len(before_groups) - len(recent_before)]
+        omitted_after = after_groups[: len(after_groups) - len(recent_after)]
+        omitted = tuple(
+            message
+            for group in (*omitted_before, *omitted_after)
+            for message in group
+        )
+        before = tuple(message for group in recent_before for message in group)
+        after = tuple(message for group in recent_after for message in group)
 
         summary = self._summary_strategy.summarize(
             omitted,
             max_chars=summary_reserve,
         )
-        prepared = _with_summary(permanent, summary) + recent
+        prepared = (
+            _with_summary(system, summary)
+            + before
+            + (current_user,)
+            + after
+        )
         shortened = 0
         if conversation_char_count(prepared) > self._budget_chars:
             prepared, shortened = _shorten_recent_content(
                 prepared,
-                recent_start=2,
+                recent_start=1,
                 budget_chars=self._budget_chars,
             )
         if conversation_char_count(prepared) > self._budget_chars and summary:
-            prepared = permanent + prepared[2:]
+            prepared = (system,) + prepared[1:]
 
         prepared_chars = conversation_char_count(prepared)
         return ContextWindow(
@@ -234,6 +297,8 @@ def _conversation_groups(
 def _select_recent_groups(
     groups: Sequence[tuple[Message, ...]],
     budget_chars: int,
+    *,
+    keep_latest: bool = True,
 ) -> tuple[tuple[Message, ...], ...]:
     if not groups:
         return ()
@@ -241,7 +306,9 @@ def _select_recent_groups(
     used = 0
     for group in reversed(groups):
         group_chars = conversation_char_count(group)
-        if selected and used + group_chars > budget_chars:
+        if used + group_chars > budget_chars and (
+            selected or not keep_latest
+        ):
             break
         selected.append(group)
         used += group_chars
@@ -251,15 +318,14 @@ def _select_recent_groups(
     return tuple(selected)
 
 
-def _with_summary(permanent: tuple[Message, ...], summary: str) -> tuple[Message, ...]:
+def _with_summary(system: Message, summary: str) -> tuple[Message, ...]:
     if not summary:
-        return permanent
-    system = permanent[0]
+        return (system,)
     summarized_system = Message(
         role=MessageRole.SYSTEM,
         content=f"{system.content or ''}{_SUMMARY_HEADING}{summary}",
     )
-    return (summarized_system, permanent[1])
+    return (summarized_system,)
 
 
 def _shorten_recent_content(
@@ -275,7 +341,7 @@ def _shorten_recent_content(
         if excess <= 0:
             break
         message = prepared[index]
-        if not message.content:
+        if message.role is not MessageRole.TOOL or not message.content:
             continue
         target_chars = max(0, len(message.content) - excess)
         replacement = _message_with_shorter_content(message, target_chars)

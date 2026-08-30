@@ -224,3 +224,53 @@ def test_context_reports_when_permanent_information_alone_exceeds_budget() -> No
     assert window.messages == messages
     assert window.budget_exceeded is True
     assert window.compacted is False
+
+
+def test_context_preserves_the_current_user_turn_and_summarizes_an_old_turn() -> None:
+    old_user = Message(
+        role=MessageRole.USER,
+        content="Explain the old implementation " + "o" * 200,
+    )
+    old_assistant = AssistantTurn(
+        content="The old implementation used one-shot execution " + "a" * 180,
+        reasoning_content="old provider state must not enter the summary",
+    ).as_message()
+    current_user = Message(
+        role=MessageRole.USER,
+        content="Now tell me only the minimum Python version.",
+    )
+    current_exchange = _exchange(
+        9,
+        name="read_file",
+        path="pyproject.toml",
+        content="requires-python = '>=3.11' " + "x" * 2_000,
+        reasoning="current continuation state",
+    )
+    messages = (
+        Message(role=MessageRole.SYSTEM, content="system rules"),
+        old_user,
+        old_assistant,
+        current_user,
+        *current_exchange,
+    )
+
+    window = ContextManager(budget_chars=520).prepare(
+        messages,
+        current_user_index=3,
+    )
+
+    assert window.prepared_chars <= 520
+    assert sum(
+        message.role is MessageRole.SYSTEM for message in window.messages
+    ) == 1
+    assert current_user in window.messages
+    assert next(
+        message for message in window.messages if message is current_user
+    ).content == current_user.content
+    assert "Earlier user requests" in (window.messages[0].content or "")
+    assert "Explain the old implemen" in (
+        window.messages[0].content or ""
+    )
+    assert "old provider state" not in (window.messages[0].content or "")
+    assert window.messages[-2].reasoning_content == "current continuation state"
+    assert window.messages[-1].tool_call_id == "call-9"

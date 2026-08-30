@@ -35,12 +35,13 @@ def test_assistant_turn_without_tools_requires_final_text(
         AssistantTurn(content=content)
 
 
-def test_assistant_turn_only_keeps_reasoning_for_tool_continuation() -> None:
-    with pytest.raises(DomainValidationError, match="tool-calling turn"):
-        AssistantTurn(
-            content="final answer",
-            reasoning_content="provider continuation state",
-        )
+def test_assistant_turn_keeps_reasoning_with_a_final_answer() -> None:
+    turn = AssistantTurn(
+        content="final answer",
+        reasoning_content="provider continuation state",
+    )
+
+    assert turn.as_message().reasoning_content == "provider continuation state"
 
 
 def test_tool_result_converts_to_correlated_tool_message() -> None:

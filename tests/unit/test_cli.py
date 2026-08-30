@@ -7,7 +7,7 @@ import pytest
 from minicoder.bootstrap import ApplicationFactory
 from minicoder.cli import main
 from minicoder.domain.errors import ModelConnectionError
-from minicoder.domain.models import AssistantTurn
+from minicoder.domain.models import AssistantTurn, MessageRole
 from tests.fakes import FakeModelAdapter
 
 
@@ -95,6 +95,120 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
     assert [
         json.loads(line)["type"] for line in trace_text.splitlines()
     ] == ["task_started", "model_requested", "task_completed"]
+
+
+def test_cli_without_a_task_runs_an_interactive_multi_turn_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(
+                content="The project uses Python.",
+                reasoning_content="first turn state",
+            ),
+            AssistantTurn(content="It requires Python 3.11."),
+        ]
+    )
+    monkeypatch.setattr(
+        ApplicationFactory,
+        "create_model_adapter",
+        lambda config: model,
+    )
+    stdout = StringIO()
+    stderr = StringIO()
+
+    exit_code = main(
+        ["--workspace", str(tmp_path)],
+        environ={
+            "MINICODER_API_KEY": "not-used",
+            "MINICODER_BASE_URL": "https://models.example.com/v1",
+            "MINICODER_MODEL": "test-model",
+        },
+        stdin=StringIO(
+            "Which language does this project use?\n"
+            "What is the minimum version?\n"
+            "/exit\n"
+        ),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert "MiniCoder interactive session" in stdout.getvalue()
+    assert "The project uses Python." in stdout.getvalue()
+    assert "It requires Python 3.11." in stdout.getvalue()
+    assert stdout.getvalue().count("[TASK] started") == 2
+    assert stderr.getvalue() == ""
+    second_request = model.requests[1].messages
+    assert [message.role for message in second_request] == [
+        MessageRole.SYSTEM,
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.USER,
+    ]
+    assert second_request[-2].reasoning_content == "first turn state"
+    assert second_request[-1].content == "What is the minimum version?"
+
+
+def test_interactive_cli_exits_cleanly_on_eof_without_calling_the_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = FakeModelAdapter([])
+    monkeypatch.setattr(
+        ApplicationFactory,
+        "create_model_adapter",
+        lambda config: model,
+    )
+
+    exit_code = main(
+        ["--workspace", str(tmp_path)],
+        environ={
+            "MINICODER_API_KEY": "not-used",
+            "MINICODER_BASE_URL": "https://models.example.com/v1",
+            "MINICODER_MODEL": "test-model",
+        },
+        stdin=StringIO(""),
+        stdout=StringIO(),
+        stderr=StringIO(),
+    )
+
+    assert exit_code == 0
+    assert model.requests == []
+
+
+def test_interactive_cli_returns_130_when_input_is_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InterruptingInput(StringIO):
+        def readline(self, size: int = -1) -> str:
+            raise KeyboardInterrupt
+
+    model = FakeModelAdapter([])
+    monkeypatch.setattr(
+        ApplicationFactory,
+        "create_model_adapter",
+        lambda config: model,
+    )
+    stderr = StringIO()
+
+    exit_code = main(
+        ["--workspace", str(tmp_path)],
+        environ={
+            "MINICODER_API_KEY": "not-used",
+            "MINICODER_BASE_URL": "https://models.example.com/v1",
+            "MINICODER_MODEL": "test-model",
+        },
+        stdin=InterruptingInput(),
+        stdout=StringIO(),
+        stderr=stderr,
+    )
+
+    assert exit_code == 130
+    assert "interrupted by user" in stderr.getvalue()
+    assert model.requests == []
 
 
 def test_cli_rejects_trace_path_with_missing_parent(tmp_path: Path) -> None:

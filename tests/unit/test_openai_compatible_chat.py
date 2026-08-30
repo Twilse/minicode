@@ -131,9 +131,9 @@ def test_adapter_serializes_provider_neutral_tools_and_parses_tool_calls() -> No
     )
 
 
-def test_adapter_replays_reasoning_only_for_assistant_tool_call_messages() -> None:
+def test_adapter_replays_reasoning_for_every_assistant_message() -> None:
     adapter, completions = _adapter_with(
-        [_response(content="done", reasoning_content="discard after final answer")]
+        [_response(content="done", reasoning_content="next final reasoning")]
     )
     call = ToolCall(id="call-1", name="read_file", arguments_json="{}")
     assistant_message = AssistantTurn(
@@ -146,9 +146,13 @@ def test_adapter_replays_reasoning_only_for_assistant_tool_call_messages() -> No
         content="file contents",
         tool_call_id="call-1",
     )
+    final_message = AssistantTurn(
+        content="Earlier answer.",
+        reasoning_content="earlier final reasoning",
+    ).as_message()
 
     turn = adapter.complete(
-        messages=(assistant_message, tool_message),
+        messages=(assistant_message, tool_message, final_message),
         tools=(),
     )
 
@@ -161,8 +165,16 @@ def test_adapter_replays_reasoning_only_for_assistant_tool_call_messages() -> No
         "content": "file contents",
         "tool_call_id": "call-1",
     }
+    assert sent_messages[2] == {
+        "role": "assistant",
+        "content": "Earlier answer.",
+        "reasoning_content": "earlier final reasoning",
+    }
     assert "tools" not in completions.requests[0]
-    assert turn == AssistantTurn(content="done")
+    assert turn == AssistantTurn(
+        content="done",
+        reasoning_content="next final reasoning",
+    )
 
 
 @pytest.mark.parametrize(

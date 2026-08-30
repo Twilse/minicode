@@ -49,6 +49,51 @@ def test_session_closes_artifacts_after_a_completed_task(tmp_path: Path) -> None
         session.run("A second task is not allowed")
 
 
+def test_session_submits_multiple_turns_and_closes_after_the_context(
+    tmp_path: Path,
+) -> None:
+    session, artifacts = _session(
+        tmp_path,
+        FakeModelAdapter(
+            [
+                AssistantTurn(content="The project uses Python."),
+                AssistantTurn(content="It requires Python 3.11."),
+            ]
+        ),
+    )
+    root = artifacts.root
+    output_id = artifacts.save("shared output")
+
+    with session as active:
+        first = active.submit("Which language does it use?")
+        assert active.closed is False
+        assert active.history == first.messages
+        assert artifacts.read(output_id, offset=0, limit=100).content == (
+            "shared output"
+        )
+
+        second = active.submit("What is the minimum version?")
+        assert second.messages[: len(first.messages)] == first.messages
+        assert active.history == second.messages
+
+    assert session.closed is True
+    assert not root.exists()
+
+
+def test_session_context_closes_artifacts_after_an_unexpected_error(
+    tmp_path: Path,
+) -> None:
+    session, artifacts = _session(tmp_path, FakeModelAdapter([]))
+    root = artifacts.root
+
+    with pytest.raises(AssertionError, match="no scripted turn"):
+        with session:
+            session.submit("Trigger the exhausted fake")
+
+    assert session.closed is True
+    assert not root.exists()
+
+
 def test_session_closes_artifacts_after_an_unexpected_error(tmp_path: Path) -> None:
     session, artifacts = _session(tmp_path, FakeModelAdapter([]))
     root = artifacts.root

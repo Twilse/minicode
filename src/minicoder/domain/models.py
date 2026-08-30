@@ -109,11 +109,11 @@ class AssistantTurn:
             raise DomainValidationError(
                 "assistant turns without tool calls require non-blank content"
             )
-        if self.reasoning_content is not None and (
-            not isinstance(self.reasoning_content, str) or not self.tool_calls
+        if self.reasoning_content is not None and not isinstance(
+            self.reasoning_content, str
         ):
             raise DomainValidationError(
-                "assistant reasoning_content requires a tool-calling turn"
+                "assistant reasoning_content must be text or None"
             )
 
     def as_message(self) -> Message:
