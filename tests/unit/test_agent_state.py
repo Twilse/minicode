@@ -26,6 +26,22 @@ def test_state_machine_accepts_the_model_tool_model_completion_path() -> None:
     assert state.model_steps == 2
 
 
+def test_state_machine_accepts_plan_before_execution() -> None:
+    state = AgentStateMachine(max_steps=2)
+
+    state.begin_model_call()
+    state.plan_ready()
+
+    assert state.phase is AgentPhase.PLAN_READY
+    assert state.can_call_model is True
+
+    state.begin_model_call()
+    state.complete()
+
+    assert state.phase is AgentPhase.COMPLETE
+    assert state.model_steps == 2
+
+
 def test_state_machine_rejects_a_model_call_after_the_step_limit() -> None:
     state = AgentStateMachine(max_steps=1)
     state.begin_model_call()

@@ -14,6 +14,7 @@ class AgentPhase(str, Enum):
 
     READY = "ready"
     CALL_MODEL = "call_model"
+    PLAN_READY = "plan_ready"
     EXECUTE_TOOLS = "execute_tools"
     REVIEW_REQUIRED = "review_required"
     COMPLETE = "complete"
@@ -26,6 +27,7 @@ class AgentStopReason(str, Enum):
     FINAL_RESPONSE = "final_response"
     MAX_STEPS = "max_steps"
     MODEL_ERROR = "model_error"
+    PLANNING_ERROR = "planning_error"
     USER_INTERRUPTED = "user_interrupted"
     VERIFICATION_UNSUPPORTED = "verification_unsupported"
 
@@ -74,11 +76,15 @@ class AgentStateMachine:
         AgentPhase.READY: frozenset({AgentPhase.CALL_MODEL}),
         AgentPhase.CALL_MODEL: frozenset(
             {
+                AgentPhase.PLAN_READY,
                 AgentPhase.EXECUTE_TOOLS,
                 AgentPhase.REVIEW_REQUIRED,
                 AgentPhase.COMPLETE,
                 AgentPhase.FAILED,
             }
+        ),
+        AgentPhase.PLAN_READY: frozenset(
+            {AgentPhase.CALL_MODEL, AgentPhase.FAILED}
         ),
         AgentPhase.EXECUTE_TOOLS: frozenset(
             {AgentPhase.CALL_MODEL, AgentPhase.FAILED}
@@ -115,6 +121,7 @@ class AgentStateMachine:
             self._phase
             in {
                 AgentPhase.READY,
+                AgentPhase.PLAN_READY,
                 AgentPhase.EXECUTE_TOOLS,
                 AgentPhase.REVIEW_REQUIRED,
             }
@@ -132,6 +139,9 @@ class AgentStateMachine:
 
     def begin_tool_execution(self) -> None:
         self._transition(AgentPhase.EXECUTE_TOOLS)
+
+    def plan_ready(self) -> None:
+        self._transition(AgentPhase.PLAN_READY)
 
     def complete(self) -> None:
         self._transition(AgentPhase.COMPLETE)

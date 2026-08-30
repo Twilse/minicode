@@ -43,6 +43,7 @@ def test_agent_jsonl_trace_excludes_message_and_tool_bodies(tmp_path: Path) -> N
     )
     model = FakeModelAdapter(
         [
+            AssistantTurn(content="1. Create the file.\n2. Verify it."),
             AssistantTurn(
                 content=None,
                 tool_calls=(call,),
@@ -73,9 +74,12 @@ def test_agent_jsonl_trace_excludes_message_and_tool_bodies(tmp_path: Path) -> N
     ):
         assert forbidden not in trace_text
     records = [json.loads(line) for line in trace_text.splitlines()]
-    assert [record["sequence"] for record in records] == list(range(1, 11))
+    assert [record["sequence"] for record in records] == list(range(1, 14))
     assert [record["type"] for record in records] == [
         "task_started",
+        "planning_started",
+        "model_requested",
+        "planning_completed",
         "model_requested",
         "tool_called",
         "tool_finished",
@@ -86,4 +90,4 @@ def test_agent_jsonl_trace_excludes_message_and_tool_bodies(tmp_path: Path) -> N
         "model_requested",
         "task_completed",
     ]
-    assert records[3]["details"]["content_chars"] > 0
+    assert records[6]["details"]["content_chars"] > 0

@@ -57,6 +57,9 @@ def test_agent_accepts_a_real_compiled_and_executed_cpp_change(
     )
     model = FakeModelAdapter(
         [
+            AssistantTurn(
+                content="1. Create the C++ file.\n2. Compile it.\n3. Run it."
+            ),
             AssistantTurn(content=None, tool_calls=(create,)),
             AssistantTurn(content=None, tool_calls=(compile_source,)),
             AssistantTurn(content=None, tool_calls=(execute_binary,)),
@@ -86,7 +89,7 @@ def test_agent_accepts_a_real_compiled_and_executed_cpp_change(
 
     assert result.phase is AgentPhase.COMPLETE
     assert result.stop_reason is AgentStopReason.FINAL_RESPONSE
-    assert result.model_steps == 4
+    assert result.model_steps == 5
     assert (tmp_path / "two_sum.cpp").read_text(encoding="utf-8") == source
     assert (tmp_path / "two_sum").is_file()
     verification_events = [
@@ -124,6 +127,7 @@ def test_agent_uses_a_startup_configured_project_verifier(tmp_path: Path) -> Non
     )
     model = FakeModelAdapter(
         [
+            AssistantTurn(content="1. Create the file.\n2. Run verification."),
             AssistantTurn(content=None, tool_calls=(create,)),
             AssistantTurn(content=None, tool_calls=(verify,)),
             AssistantTurn(content="Created and verified the Zig source."),

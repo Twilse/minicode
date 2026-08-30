@@ -27,6 +27,8 @@ class AppConfig:
     command_timeout_seconds: float  # Per-command execution timeout in seconds.
     max_tool_output_chars: int  # Maximum characters returned by one tool call.
     context_budget_chars: int  # Approximate character budget for conversation history.
+    memory_enabled: bool  # Whether successful turns create local project memory.
+    planning_enabled: bool  # Whether each user turn starts with a no-tool plan.
 
     def __repr__(self) -> str:
         """Return a debug representation that never includes the secret key."""
@@ -41,7 +43,9 @@ class AppConfig:
             f"model_timeout_seconds={self.model_timeout_seconds!r}, "
             f"command_timeout_seconds={self.command_timeout_seconds!r}, "
             f"max_tool_output_chars={self.max_tool_output_chars!r}, "
-            f"context_budget_chars={self.context_budget_chars!r}"
+            f"context_budget_chars={self.context_budget_chars!r}, "
+            f"memory_enabled={self.memory_enabled!r}, "
+            f"planning_enabled={self.planning_enabled!r}"
             ")"
         )
 
@@ -99,6 +103,16 @@ class AppConfig:
                 source,
                 "MINICODER_CONTEXT_BUDGET_CHARS",
                 60_000,
+            ),
+            memory_enabled=_boolean(
+                source,
+                "MINICODER_MEMORY_ENABLED",
+                False,
+            ),
+            planning_enabled=_boolean(
+                source,
+                "MINICODER_PLANNING_ENABLED",
+                True,
             ),
         )
 
@@ -161,3 +175,18 @@ def _int_at_least(
     if value < minimum:
         raise ConfigurationError(f"{name} must be at least {minimum}")
     return value
+
+
+def _boolean(
+    environ: Mapping[str, str],
+    name: str,
+    default: bool,
+) -> bool:
+    raw_value = environ.get(name, str(default)).strip().casefold()
+    if raw_value in {"1", "true", "yes", "on"}:
+        return True
+    if raw_value in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(
+        f"{name} must be one of true, false, 1, 0, yes, no, on, or off"
+    )

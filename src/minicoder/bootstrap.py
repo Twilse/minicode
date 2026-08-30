@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
 from typing import Mapping
 
 from openai import OpenAI
 
+from minicoder.adapters.jsonl_memory import JsonlProjectMemoryStore
 from minicoder.adapters.openai_compatible_chat import OpenAICompatibleChatAdapter
 from minicoder.adapters.subprocess_runner import (
     PosixSubprocessAdapter,
@@ -23,10 +25,12 @@ from minicoder.application.completion import (
 )
 from minicoder.application.context import ContextManager
 from minicoder.application.event_bus import EventBus, EventDeliveryFailure
+from minicoder.application.memory import MemorySummarizer, ModelMemorySummarizer
 from minicoder.application.ports import (
     EventSinkPort,
     ModelPort,
     ProcessPort,
+    ProjectMemoryPort,
     ToolPort,
 )
 from minicoder.application.retry import (
@@ -38,8 +42,11 @@ from minicoder.application.verification import (
     ConfiguredVerificationCommand,
 )
 from minicoder.config import AppConfig
+from minicoder.domain.errors import MemoryPersistenceError
+from minicoder.domain.events import AgentEventKind
+from minicoder.domain.memory import ProjectMemoryRecord
 from minicoder.domain.models import Message
-from minicoder.domain.state import AgentRunResult
+from minicoder.domain.state import AgentPhase, AgentRunResult
 from minicoder.platforms import OperatingSystem, detect_operating_system
 from minicoder.tools.command_safety import CommandSafetyPolicy
 from minicoder.tools.files import (
@@ -79,10 +86,20 @@ class AgentSession:
         engine: AgentEngine,
         artifacts: ToolOutputArtifactStore,
         events: EventBus,
+        memory_store: ProjectMemoryPort | None = None,
+        memory_summarizer: MemorySummarizer | None = None,
+        initial_memory: Sequence[ProjectMemoryRecord] = (),
     ) -> None:
+        if (memory_store is None) != (memory_summarizer is None):
+            raise ValueError(
+                "memory store and summarizer must be configured together"
+            )
         self._engine = engine
         self._artifacts = artifacts
         self._events = events
+        self._memory_store = memory_store
+        self._memory_summarizer = memory_summarizer
+        self._initial_memory = tuple(initial_memory)
         self._history: tuple[Message, ...] = ()
         self._closed = False
 
@@ -110,8 +127,41 @@ class AgentSession:
         result = self._engine.run_turn(
             user_message,
             history=self._history,
+            project_memory=self._initial_memory if not self._history else (),
         )
         self._history = result.messages
+        if (
+            result.phase is AgentPhase.COMPLETE
+            and result.final_response is not None
+            and self._memory_store is not None
+            and self._memory_summarizer is not None
+        ):
+            summary = self._memory_summarizer.summarize(
+                task=user_message,
+                outcome=result.final_response,
+                model_step=result.model_steps,
+            )
+            record = ProjectMemoryRecord(
+                recorded_at=datetime.now(timezone.utc),
+                summary=summary,
+            )
+            try:
+                self._memory_store.append(record)
+            except MemoryPersistenceError as exc:
+                self._events.publish(
+                    AgentEventKind.MEMORY_OPERATION_FAILED,
+                    model_step=result.model_steps,
+                    details={
+                        "operation": "append",
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            else:
+                self._events.publish(
+                    AgentEventKind.MEMORY_SAVED,
+                    model_step=result.model_steps,
+                    details={"summary_chars": len(summary)},
+                )
         return result
 
     def run(self, task: str) -> AgentRunResult:
@@ -219,6 +269,30 @@ class ApplicationFactory:
         )
 
     @staticmethod
+    def create_project_memory_store(config: AppConfig) -> ProjectMemoryPort:
+        """Create private JSONL persistence bound to the canonical workspace."""
+
+        return JsonlProjectMemoryStore(
+            workspace=config.workspace,
+            sensitive_values=(config.api_key,),
+        )
+
+    @staticmethod
+    def create_memory_summarizer(
+        config: AppConfig,
+        *,
+        model: ModelPort,
+        events: EventBus,
+    ) -> MemorySummarizer:
+        """Create the one-shot no-tool model memory summarizer."""
+
+        return ModelMemorySummarizer(
+            model=model,
+            events=events,
+            sensitive_values=(config.api_key,),
+        )
+
+    @staticmethod
     def create_tool_registry(
         config: AppConfig,
         *,
@@ -258,6 +332,7 @@ class ApplicationFactory:
         model_adapter: ModelPort | None = None,
         process_adapter: ProcessPort | None = None,
         event_sinks: Sequence[EventSinkPort] = (),
+        memory_store: ProjectMemoryPort | None = None,
     ) -> AgentSession:
         """Assemble one task session while retaining ownership of its resources."""
 
@@ -273,6 +348,39 @@ class ApplicationFactory:
             else process_adapter
         )
         events = EventBus(event_sinks)
+        active_memory_store: ProjectMemoryPort | None = None
+        memory_summarizer: MemorySummarizer | None = None
+        initial_memory: tuple[ProjectMemoryRecord, ...] = ()
+        if config.memory_enabled:
+            try:
+                active_memory_store = (
+                    ApplicationFactory.create_project_memory_store(config)
+                    if memory_store is None
+                    else memory_store
+                )
+                initial_memory = tuple(active_memory_store.load_recent())
+            except MemoryPersistenceError as exc:
+                events.publish(
+                    AgentEventKind.MEMORY_OPERATION_FAILED,
+                    model_step=0,
+                    details={
+                        "operation": "load",
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                active_memory_store = None
+            else:
+                if initial_memory:
+                    events.publish(
+                        AgentEventKind.MEMORY_LOADED,
+                        model_step=0,
+                        details={"record_count": len(initial_memory)},
+                    )
+                memory_summarizer = ApplicationFactory.create_memory_summarizer(
+                    config,
+                    model=model,
+                    events=events,
+                )
         artifacts = ToolOutputArtifactStore(
             max_read_chars=config.max_tool_output_chars // 2,
         )
@@ -292,8 +400,16 @@ class ApplicationFactory:
                 completion=ApplicationFactory.create_completion_policy(
                     context.verification_commands,
                 ),
+                planning_enabled=config.planning_enabled,
             )
         except Exception:
             artifacts.close()
             raise
-        return AgentSession(engine=engine, artifacts=artifacts, events=events)
+        return AgentSession(
+            engine=engine,
+            artifacts=artifacts,
+            events=events,
+            memory_store=active_memory_store,
+            memory_summarizer=memory_summarizer,
+            initial_memory=initial_memory,
+        )

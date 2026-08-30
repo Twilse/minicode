@@ -16,6 +16,9 @@ from minicoder.application.retry import ExponentialBackoffRetryStrategy
 from minicoder.application.verification import ConfiguredVerificationCommand
 from minicoder.bootstrap import ApplicationFactory
 from minicoder.config import AppConfig
+from minicoder.domain.errors import MemoryPersistenceError
+from minicoder.domain.events import AgentEventKind
+from minicoder.domain.memory import ProjectMemoryRecord
 from minicoder.domain.models import AssistantTurn, ToolCall
 from minicoder.domain.state import AgentPhase
 from minicoder.platforms import OperatingSystem
@@ -23,7 +26,7 @@ from minicoder.tools.output import (
     StreamAwareOutputCompactor,
     ToolOutputArtifactStore,
 )
-from tests.fakes import FakeModelAdapter
+from tests.fakes import FakeModelAdapter, MemoryEventSink
 
 
 def test_factory_creates_validated_bootstrap_context(tmp_path: Path) -> None:
@@ -209,7 +212,12 @@ def test_factory_creates_one_shot_agent_session_with_injected_adapters(
         workspace=tmp_path,
         platform_name="darwin",
     )
-    model = FakeModelAdapter([AssistantTurn(content="done")])
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(content="1. Inspect the workspace."),
+            AssistantTurn(content="done"),
+        ]
+    )
     session = ApplicationFactory.create_agent_session(
         context,
         model_adapter=model,
@@ -221,3 +229,49 @@ def test_factory_creates_one_shot_agent_session_with_injected_adapters(
     assert result.phase is AgentPhase.COMPLETE
     assert result.final_response == "done"
     assert session.closed is True
+
+
+def test_factory_keeps_agent_available_when_memory_load_fails(
+    tmp_path: Path,
+) -> None:
+    class FailingMemoryStore:
+        def load_recent(self) -> tuple[ProjectMemoryRecord, ...]:
+            raise MemoryPersistenceError("unreadable memory")
+
+        def append(self, record: ProjectMemoryRecord) -> None:
+            raise AssertionError("disabled memory must not append")
+
+    context = ApplicationFactory.create_bootstrap_context(
+        environ={
+            "MINICODER_API_KEY": "not-used",
+            "MINICODER_BASE_URL": "https://models.example.com/v1",
+            "MINICODER_MODEL": "not-used",
+            "MINICODER_MEMORY_ENABLED": "true",
+        },
+        workspace=tmp_path,
+        platform_name="darwin",
+    )
+    observed = MemoryEventSink()
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(content="1. Inspect the workspace."),
+            AssistantTurn(content="done without memory"),
+        ]
+    )
+    session = ApplicationFactory.create_agent_session(
+        context,
+        model_adapter=model,
+        process_adapter=PosixSubprocessAdapter(),
+        event_sinks=(observed,),
+        memory_store=FailingMemoryStore(),
+    )
+
+    result = session.run("Complete despite unreadable memory")
+
+    assert result.phase is AgentPhase.COMPLETE
+    failure = next(
+        event
+        for event in observed.events
+        if event.kind is AgentEventKind.MEMORY_OPERATION_FAILED
+    )
+    assert failure.details["operation"] == "load"

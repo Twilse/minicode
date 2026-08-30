@@ -21,6 +21,10 @@ class AgentStateError(MiniCoderError, RuntimeError):
     """Raised when the agent attempts an invalid state transition."""
 
 
+class MemoryPersistenceError(MiniCoderError):
+    """Raised when optional project memory cannot be read or persisted."""
+
+
 class UnsupportedPlatformError(ConfigurationError):
     """Raised when no safe process adapter exists for the current platform."""
 

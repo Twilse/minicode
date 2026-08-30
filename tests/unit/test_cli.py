@@ -30,6 +30,8 @@ def test_check_config_prints_safe_summary(tmp_path: Path) -> None:
     assert "configuration is valid" in stdout.getvalue()
     assert "deepseek-v4-pro" in stdout.getvalue()
     assert "verification_commands=0" in stdout.getvalue()
+    assert "planning_enabled=True" in stdout.getvalue()
+    assert "memory_enabled=False" in stdout.getvalue()
     assert "never-print-this" not in stdout.getvalue()
     assert stderr.getvalue() == ""
 
@@ -102,7 +104,12 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    model = FakeModelAdapter([AssistantTurn(content="Task completed safely.")])
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(content="1. Inspect the project.\n2. Report the result."),
+            AssistantTurn(content="Task completed safely."),
+        ]
+    )
     monkeypatch.setattr(
         ApplicationFactory,
         "create_model_adapter",
@@ -133,8 +140,10 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
     assert exit_code == 0
     assert stdout.getvalue().splitlines() == [
         "[开始] 正在处理你的任务（本轮最多 20 个步骤）",
-        "[分析] 正在规划下一步（步骤 1）",
-        "[完成] 任务已完成（共 1 个步骤）",
+        "[计划] 正在制定本轮执行计划…",
+        "[计划] 已生成，开始按照计划处理",
+        "[分析] 正在规划下一步（步骤 2）",
+        "[完成] 任务已完成（共 2 个步骤）",
         "Task completed safely.",
     ]
     assert stderr.getvalue() == ""
@@ -143,7 +152,14 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
     assert "secret-key-not-in-trace" not in trace_text
     assert [
         json.loads(line)["type"] for line in trace_text.splitlines()
-    ] == ["task_started", "model_requested", "task_completed"]
+    ] == [
+        "task_started",
+        "planning_started",
+        "model_requested",
+        "planning_completed",
+        "model_requested",
+        "task_completed",
+    ]
 
 
 def test_cli_without_a_task_runs_an_interactive_multi_turn_session(
@@ -152,10 +168,12 @@ def test_cli_without_a_task_runs_an_interactive_multi_turn_session(
 ) -> None:
     model = FakeModelAdapter(
         [
+            AssistantTurn(content="1. Inspect project metadata.\n2. Answer."),
             AssistantTurn(
                 content="The project uses Python.",
                 reasoning_content="first turn state",
             ),
+            AssistantTurn(content="1. Reuse the prior context.\n2. Answer."),
             AssistantTurn(content="It requires Python 3.11."),
         ]
     )
@@ -189,15 +207,17 @@ def test_cli_without_a_task_runs_an_interactive_multi_turn_session(
     assert "It requires Python 3.11." in stdout.getvalue()
     assert stdout.getvalue().count("[开始]") == 2
     assert stderr.getvalue() == ""
-    second_request = model.requests[1].messages
-    assert [message.role for message in second_request] == [
-        MessageRole.SYSTEM,
+    second_request = model.requests[3].messages
+    assert [message.role for message in second_request[-4:]] == [
+        MessageRole.ASSISTANT,
         MessageRole.USER,
         MessageRole.ASSISTANT,
         MessageRole.USER,
     ]
-    assert second_request[-2].reasoning_content == "first turn state"
-    assert second_request[-1].content == "What is the minimum version?"
+    assert second_request[-4].reasoning_content == "first turn state"
+    assert "What is the minimum version?" in (
+        second_request[-3].content or ""
+    )
 
 
 def test_interactive_cli_exits_cleanly_on_eof_without_calling_the_model(
@@ -322,6 +342,7 @@ def test_cli_renders_model_markdown_instead_of_printing_fence_markers(
 ) -> None:
     model = FakeModelAdapter(
         [
+            AssistantTurn(content="1. Explain the input format."),
             AssistantTurn(
                 content=(
                     "输入格式：\n\n"

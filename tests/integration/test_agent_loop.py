@@ -14,7 +14,7 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
             "MINICODER_API_KEY": "not-used",
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
-            "MINICODER_MAX_STEPS": "3",
+            "MINICODER_MAX_STEPS": "4",
         },
         workspace=tmp_path,
         platform_name="darwin",
@@ -35,6 +35,7 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
     )
     model = FakeModelAdapter(
         [
+            AssistantTurn(content="1. Create the file.\n2. Verify it."),
             AssistantTurn(content=None, tool_calls=(create_call,)),
             AssistantTurn(content=None, tool_calls=(verify_call,)),
             AssistantTurn(content="Created and verified the requested file."),
@@ -52,7 +53,7 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
 
     assert result.phase is AgentPhase.COMPLETE
     assert result.stop_reason is AgentStopReason.FINAL_RESPONSE
-    assert result.model_steps == 3
+    assert result.model_steps == 4
     assert (tmp_path / "created_by_agent.py").read_text(encoding="utf-8") == (
         "value = 1\n"
     )
@@ -60,7 +61,7 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
         MessageRole.SYSTEM,
         MessageRole.USER,
         MessageRole.ASSISTANT,
-        MessageRole.TOOL,
+        MessageRole.USER,
     ]
     assert [message.role for message in model.requests[2].messages[-2:]] == [
         MessageRole.ASSISTANT,
@@ -69,6 +70,9 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
     assert session.closed is True
     assert [event.kind for event in events.events] == [
         AgentEventKind.TASK_STARTED,
+        AgentEventKind.PLANNING_STARTED,
+        AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.PLANNING_COMPLETED,
         AgentEventKind.MODEL_REQUESTED,
         AgentEventKind.TOOL_CALLED,
         AgentEventKind.TOOL_FINISHED,
@@ -89,7 +93,7 @@ def test_factory_session_continues_unverified_work_in_a_second_user_turn(
             "MINICODER_API_KEY": "not-used",
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
-            "MINICODER_MAX_STEPS": "2",
+            "MINICODER_MAX_STEPS": "3",
         },
         workspace=tmp_path,
         platform_name="darwin",
@@ -110,8 +114,10 @@ def test_factory_session_continues_unverified_work_in_a_second_user_turn(
     )
     model = FakeModelAdapter(
         [
+            AssistantTurn(content="1. Create the file.\n2. Verify it."),
             AssistantTurn(content=None, tool_calls=(create_call,)),
             AssistantTurn(content="The file is created."),
+            AssistantTurn(content="1. Verify the existing file."),
             AssistantTurn(content=None, tool_calls=(verify_call,)),
             AssistantTurn(content="The file is now verified."),
         ]
@@ -133,13 +139,15 @@ def test_factory_session_continues_unverified_work_in_a_second_user_turn(
         second = session.submit("Continue by verifying the file")
 
     assert second.phase is AgentPhase.COMPLETE
-    assert second.model_steps == 2
+    assert second.model_steps == 3
     assert second.final_response == "The file is now verified."
     assert (tmp_path / "continued.py").read_text(encoding="utf-8") == (
         "value = 2\n"
     )
-    second_turn_request = model.requests[2].messages
-    assert second_turn_request[-1].content == "Continue by verifying the file"
+    second_turn_request = model.requests[3].messages
+    assert "Continue by verifying the file" in (
+        second_turn_request[-1].content or ""
+    )
     assert sum(
         message.role is MessageRole.SYSTEM for message in second_turn_request
     ) == 1

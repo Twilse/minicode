@@ -129,6 +129,40 @@ def test_console_sink_omits_success_noise_and_internal_call_ids() -> None:
     assert "private-call-id" not in output.getvalue()
 
 
+def test_console_sink_renders_planning_and_memory_as_optional_progress() -> None:
+    output = StringIO()
+    bus = EventBus((ConsoleEventSink(output),), run_id="run-plan-memory")
+
+    bus.publish(AgentEventKind.PLANNING_STARTED, model_step=0)
+    bus.publish(
+        AgentEventKind.MODEL_REQUESTED,
+        model_step=1,
+        details={"request_kind": "planning"},
+    )
+    bus.publish(AgentEventKind.PLANNING_COMPLETED, model_step=1)
+    bus.publish(
+        AgentEventKind.MEMORY_LOADED,
+        model_step=0,
+        details={"record_count": 3},
+    )
+    bus.publish(AgentEventKind.MEMORY_SUMMARY_REQUESTED, model_step=2)
+    bus.publish(AgentEventKind.MEMORY_SUMMARY_COMPLETED, model_step=2)
+    bus.publish(AgentEventKind.MEMORY_SAVED, model_step=2)
+    bus.publish(
+        AgentEventKind.MEMORY_OPERATION_FAILED,
+        model_step=2,
+        details={"operation": "append"},
+    )
+
+    assert output.getvalue().splitlines() == [
+        "[计划] 正在制定本轮执行计划…",
+        "[计划] 已生成，开始按照计划处理",
+        "[记忆] 已加载这个项目最近的 3 条记录",
+        "[记忆] 正在整理本轮可供以后参考的项目摘要…",
+        "[记忆] 本地记忆文件不可用；本次任务结果不受影响",
+    ]
+
+
 def test_jsonl_sink_appends_parseable_versioned_records(tmp_path: Path) -> None:
     trace_path = tmp_path / "agent.jsonl"
     sink = JsonlTraceSink(trace_path)

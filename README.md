@@ -8,7 +8,8 @@ The project is currently being developed in small, test-backed increments. Do no
 
 MiniCoder provides a synchronous multi-turn model/tool loop, workspace-scoped
 file tools, cross-platform command execution, bounded diagnostic output,
-context compaction, verification-before-completion, explicit states, and
+context compaction, an explicit plan-before-execution phase,
+verification-before-completion, optional project memory, explicit states, and
 sanitized Observer events for the console and optional JSONL traces.
 
 Configure any OpenAI-compatible Chat Completions endpoint with tool calling:
@@ -48,6 +49,54 @@ tool argument/output bodies, final response bodies, and model reasoning content.
 
 Each new interactive user turn receives a fresh model-step allowance while prior
 messages and completion evidence remain available to the session.
+
+## Planning before execution
+
+Planning is enabled by default. At the start of every user turn, the first model
+request receives no tool definitions and may only return a concise numbered
+plan. MiniCoder then adds an execution instruction and makes the tools available.
+The system prompt tells the model to follow that plan unless file contents, tool
+results, errors, or safety rules provide a concrete reason to adapt it. The plan
+remains in normal conversation history and its model request counts toward
+`MINICODER_MAX_STEPS`.
+
+Planning can be disabled for providers or small models that do not handle this
+two-phase interaction well:
+
+```bash
+export MINICODER_PLANNING_ENABLED=false
+```
+
+## Optional project memory
+
+Project memory is disabled by default and must be enabled explicitly:
+
+```bash
+export MINICODER_MEMORY_ENABLED=true
+```
+
+After each successfully completed user turn, MiniCoder makes one additional
+no-tool model request to create a bounded semantic summary. A later process
+started with the same canonical workspace path loads up to eight recent
+summaries and supplies them as historical data on the first turn. This memory is
+separate from the optional audit trace and is stored outside the project at
+`~/.minicoder/memory/<workspace-hash>.jsonl`.
+
+Only the original user request and final answer are sent to the configured model
+for summarization; tool output, model reasoning, and the full conversation are
+not included. The configured API key is redacted if it appears in persisted
+text. A summary-model failure uses a deterministic bounded fallback, while a
+memory read or write failure is reported as a warning and never changes a
+successful task into a failed one. That fallback contains bounded excerpts from
+the request and answer rather than a model-written abstraction. Failed tasks are
+not remembered.
+
+Enabling memory therefore adds one model request per successful turn and stores
+derived project information locally. Other secrets contained in a request or
+answer cannot be identified with certainty, so review this tradeoff before
+enabling it. The workspace path is the project identity: moving the project
+starts a different memory file. The current lightweight store intentionally has
+no automatic rotation, cross-process file locking, or `/forget` command.
 
 ## Terminal experience
 

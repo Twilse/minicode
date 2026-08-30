@@ -192,5 +192,7 @@ def _configuration_summary(context: BootstrapContext) -> str:
             f"workspace={config.workspace}",
             f"operating_system={context.operating_system.value}",
             f"verification_commands={len(context.verification_commands)}",
+            f"planning_enabled={config.planning_enabled}",
+            f"memory_enabled={config.memory_enabled}",
         )
     )

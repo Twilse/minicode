@@ -46,8 +46,27 @@ def _format_event(event: AgentEvent) -> str | None:
             "[开始] 正在处理你的任务"
             f"（本轮最多 {details['max_steps']} 个步骤）"
         )
+    if event.kind is AgentEventKind.PLANNING_STARTED:
+        return "[计划] 正在制定本轮执行计划…"
+    if event.kind is AgentEventKind.PLANNING_COMPLETED:
+        return "[计划] 已生成，开始按照计划处理"
     if event.kind is AgentEventKind.MODEL_REQUESTED:
+        if details.get("request_kind") == "planning":
+            return None
         return f"[分析] 正在规划下一步（步骤 {event.model_step}）"
+    if event.kind is AgentEventKind.MEMORY_LOADED:
+        count = int(details.get("record_count", 0))
+        return f"[记忆] 已加载这个项目最近的 {count} 条记录"
+    if event.kind is AgentEventKind.MEMORY_SUMMARY_REQUESTED:
+        return "[记忆] 正在整理本轮可供以后参考的项目摘要…"
+    if event.kind is AgentEventKind.MEMORY_SUMMARY_COMPLETED:
+        return None
+    if event.kind is AgentEventKind.MEMORY_SUMMARY_FAILED:
+        return "[记忆] 模型总结未成功，已改用基础摘要"
+    if event.kind is AgentEventKind.MEMORY_SAVED:
+        return None
+    if event.kind is AgentEventKind.MEMORY_OPERATION_FAILED:
+        return "[记忆] 本地记忆文件不可用；本次任务结果不受影响"
     if event.kind is AgentEventKind.MODEL_RETRY_SCHEDULED:
         return (
             f"[重试] 模型服务暂时不可用，{details['delay_seconds']} 秒后"
@@ -93,6 +112,8 @@ def _failure_message(reason: str, model_step: int) -> str:
         return f"[未完成] 已达到本轮最大处理步骤（{model_step} 步）"
     if reason == "model_error":
         return "[失败] 模型服务请求失败"
+    if reason == "planning_error":
+        return "[失败] 模型没有返回可执行的计划"
     if reason == "user_interrupted":
         return "[停止] 用户已中断任务"
     if reason == "verification_unsupported":

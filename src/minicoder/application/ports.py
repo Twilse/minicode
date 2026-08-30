@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Protocol
 
 from minicoder.domain.events import AgentEvent
+from minicoder.domain.memory import ProjectMemoryRecord
 from minicoder.domain.models import (
     AssistantTurn,
     Message,
@@ -36,6 +37,20 @@ class ModelPort(Protocol):
         tools: Sequence[ToolDefinition],
     ) -> AssistantTurn:
         """Send one conversation snapshot and return one assistant turn."""
+
+        ...
+
+
+class ProjectMemoryPort(Protocol):
+    """Load and append workspace-scoped project memories."""
+
+    def load_recent(self) -> Sequence[ProjectMemoryRecord]:
+        """Return recent valid records in chronological order."""
+
+        ...
+
+    def append(self, record: ProjectMemoryRecord) -> None:
+        """Persist one completed-turn memory without changing older records."""
 
         ...
 
