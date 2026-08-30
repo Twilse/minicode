@@ -45,6 +45,21 @@ def test_state_machine_rejects_transition_out_of_a_terminal_phase() -> None:
         state.fail()
 
 
+def test_state_machine_allows_policy_feedback_before_another_model_call() -> None:
+    state = AgentStateMachine(max_steps=2)
+
+    state.begin_model_call()
+    state.require_revision()
+
+    assert state.phase is AgentPhase.REVIEW_REQUIRED
+    assert state.can_call_model is True
+
+    state.begin_model_call()
+    state.complete()
+
+    assert state.phase is AgentPhase.COMPLETE
+
+
 @pytest.mark.parametrize("max_steps", [0, -1, True, 1.5])
 def test_state_machine_requires_a_positive_integer_limit(max_steps: object) -> None:
     with pytest.raises(DomainValidationError, match="positive integer"):

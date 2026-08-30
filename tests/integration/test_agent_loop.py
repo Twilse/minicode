@@ -23,12 +23,20 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
         id="call-create",
         name="create_file",
         arguments_json=(
-            '{"path":"created_by_agent.txt","content":"agent result\\n"}'
+            '{"path":"created_by_agent.py","content":"value = 1\\n"}'
+        ),
+    )
+    verify_call = ToolCall(
+        id="call-verify",
+        name="run_command",
+        arguments_json=(
+            '{"argv":["python","-m","py_compile","created_by_agent.py"]}'
         ),
     )
     model = FakeModelAdapter(
         [
             AssistantTurn(content=None, tool_calls=(create_call,)),
+            AssistantTurn(content=None, tool_calls=(verify_call,)),
             AssistantTurn(content="Created and verified the requested file."),
         ]
     )
@@ -40,17 +48,21 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
         event_sinks=(events,),
     )
 
-    result = session.run("Create created_by_agent.txt")
+    result = session.run("Create created_by_agent.py")
 
     assert result.phase is AgentPhase.COMPLETE
     assert result.stop_reason is AgentStopReason.FINAL_RESPONSE
-    assert result.model_steps == 2
-    assert (tmp_path / "created_by_agent.txt").read_text(encoding="utf-8") == (
-        "agent result\n"
+    assert result.model_steps == 3
+    assert (tmp_path / "created_by_agent.py").read_text(encoding="utf-8") == (
+        "value = 1\n"
     )
     assert [message.role for message in model.requests[1].messages] == [
         MessageRole.SYSTEM,
         MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.TOOL,
+    ]
+    assert [message.role for message in model.requests[2].messages[-2:]] == [
         MessageRole.ASSISTANT,
         MessageRole.TOOL,
     ]
@@ -60,6 +72,10 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
         AgentEventKind.MODEL_REQUESTED,
         AgentEventKind.TOOL_CALLED,
         AgentEventKind.TOOL_FINISHED,
+        AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.TOOL_CALLED,
+        AgentEventKind.TOOL_FINISHED,
+        AgentEventKind.VERIFICATION_PASSED,
         AgentEventKind.MODEL_REQUESTED,
         AgentEventKind.TASK_COMPLETED,
     ]

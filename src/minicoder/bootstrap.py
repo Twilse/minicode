@@ -15,6 +15,10 @@ from minicoder.adapters.subprocess_runner import (
     WindowsSubprocessAdapter,
 )
 from minicoder.application.agent_engine import AgentEngine
+from minicoder.application.completion import (
+    CompletionPolicy,
+    EvidenceBasedCompletionPolicy,
+)
 from minicoder.application.context import ContextManager
 from minicoder.application.event_bus import EventBus, EventDeliveryFailure
 from minicoder.application.ports import (
@@ -153,6 +157,12 @@ class ApplicationFactory:
         return ContextManager(budget_chars=config.context_budget_chars)
 
     @staticmethod
+    def create_completion_policy() -> CompletionPolicy:
+        """Create the host-side evidence gate for final model responses."""
+
+        return EvidenceBasedCompletionPolicy()
+
+    @staticmethod
     def create_retry_strategy() -> RetryStrategy:
         """Create the single visible policy for transient model failures."""
 
@@ -233,6 +243,7 @@ class ApplicationFactory:
                 events=events,
                 context=ApplicationFactory.create_context_manager(config),
                 retries=ApplicationFactory.create_retry_strategy(),
+                completion=ApplicationFactory.create_completion_policy(),
             )
         except Exception:
             artifacts.close()

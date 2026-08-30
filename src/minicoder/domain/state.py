@@ -15,6 +15,7 @@ class AgentPhase(str, Enum):
     READY = "ready"
     CALL_MODEL = "call_model"
     EXECUTE_TOOLS = "execute_tools"
+    REVIEW_REQUIRED = "review_required"
     COMPLETE = "complete"
     FAILED = "failed"
 
@@ -73,11 +74,15 @@ class AgentStateMachine:
         AgentPhase.CALL_MODEL: frozenset(
             {
                 AgentPhase.EXECUTE_TOOLS,
+                AgentPhase.REVIEW_REQUIRED,
                 AgentPhase.COMPLETE,
                 AgentPhase.FAILED,
             }
         ),
         AgentPhase.EXECUTE_TOOLS: frozenset(
+            {AgentPhase.CALL_MODEL, AgentPhase.FAILED}
+        ),
+        AgentPhase.REVIEW_REQUIRED: frozenset(
             {AgentPhase.CALL_MODEL, AgentPhase.FAILED}
         ),
         AgentPhase.COMPLETE: frozenset(),
@@ -106,7 +111,12 @@ class AgentStateMachine:
     @property
     def can_call_model(self) -> bool:
         return (
-            self._phase in {AgentPhase.READY, AgentPhase.EXECUTE_TOOLS}
+            self._phase
+            in {
+                AgentPhase.READY,
+                AgentPhase.EXECUTE_TOOLS,
+                AgentPhase.REVIEW_REQUIRED,
+            }
             and self._model_steps < self._max_steps
         )
 
@@ -124,6 +134,9 @@ class AgentStateMachine:
 
     def complete(self) -> None:
         self._transition(AgentPhase.COMPLETE)
+
+    def require_revision(self) -> None:
+        self._transition(AgentPhase.REVIEW_REQUIRED)
 
     def fail(self) -> None:
         self._transition(AgentPhase.FAILED)

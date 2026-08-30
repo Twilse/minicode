@@ -281,6 +281,229 @@ def test_engine_compacts_only_the_model_snapshot_and_keeps_full_run_history() ->
     assert events.events[compacted_index].details["shortened_message_count"] == 1
 
 
+def test_engine_rejects_early_completion_then_accepts_verified_work() -> None:
+    mutation = ToolCall(
+        id="call-change",
+        name="replace_text",
+        arguments_json='{"path":"app.py"}',
+    )
+    verification = ToolCall(
+        id="call-test",
+        name="run_command",
+        arguments_json='{"argv":["pytest","-q"]}',
+    )
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(content=None, tool_calls=(mutation,)),
+            AssistantTurn(content="The change is complete."),
+            AssistantTurn(content=None, tool_calls=(verification,)),
+            AssistantTurn(content="The change is now tested and complete."),
+        ]
+    )
+    tools = FakeToolAdapter(
+        [
+            ToolResult(
+                call_id=mutation.id,
+                tool_name=mutation.name,
+                ok=True,
+                content="changed app.py",
+                metadata={"path": "app.py"},
+            ),
+            ToolResult(
+                call_id=verification.id,
+                tool_name=verification.name,
+                ok=True,
+                content="1 passed",
+                metadata={
+                    "argv": ("pytest", "-q"),
+                    "exit_code": 0,
+                    "timed_out": False,
+                },
+            ),
+        ],
+        definitions=(_definition("replace_text"), _definition("run_command")),
+    )
+    events = MemoryEventSink()
+    engine = AgentEngine(
+        model=model,
+        tools=tools,
+        max_steps=4,
+        events=EventBus((events,), run_id="run-completion"),
+    )
+
+    result = engine.run("Change app.py safely")
+
+    assert result.phase is AgentPhase.COMPLETE
+    assert result.model_steps == 4
+    assert result.final_response == "The change is now tested and complete."
+    third_request = model.requests[2].messages
+    assert third_request[-2].role is MessageRole.ASSISTANT
+    assert third_request[-2].content == "The change is complete."
+    assert third_request[-1].role is MessageRole.USER
+    assert "completion policy" in (third_request[-1].content or "")
+    assert "app.py" in (third_request[-1].content or "")
+    assert [event.kind for event in events.events] == [
+        AgentEventKind.TASK_STARTED,
+        AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.TOOL_CALLED,
+        AgentEventKind.TOOL_FINISHED,
+        AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.COMPLETION_REJECTED,
+        AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.TOOL_CALLED,
+        AgentEventKind.TOOL_FINISHED,
+        AgentEventKind.VERIFICATION_PASSED,
+        AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.TASK_COMPLETED,
+    ]
+    assert events.events[5].details["reason"] == "verification_required"
+    assert events.events[9].details == {"verification_kind": "pytest"}
+
+
+def test_engine_reports_unverified_work_when_step_limit_is_reached() -> None:
+    mutation = ToolCall(
+        id="call-create",
+        name="create_file",
+        arguments_json='{"path":"new.py"}',
+    )
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(content=None, tool_calls=(mutation,)),
+            AssistantTurn(content="Created the file."),
+        ]
+    )
+    tools = FakeToolAdapter(
+        [
+            ToolResult(
+                call_id=mutation.id,
+                tool_name=mutation.name,
+                ok=True,
+                content="created new.py",
+                metadata={"path": "new.py"},
+            )
+        ],
+        definitions=(_definition("create_file"),),
+    )
+    engine = AgentEngine(model=model, tools=tools, max_steps=2)
+
+    result = engine.run("Create new.py")
+
+    assert result.phase is AgentPhase.FAILED
+    assert result.stop_reason is AgentStopReason.MAX_STEPS
+    assert result.model_steps == 2
+    assert "not verified" in (result.failure_message or "")
+    assert "new.py" in (result.failure_message or "")
+    assert result.messages[-1].role is MessageRole.USER
+    assert "completion policy" in (result.messages[-1].content or "")
+
+
+def test_engine_requires_repair_after_failed_verification() -> None:
+    first_change = ToolCall(
+        id="call-first-change",
+        name="replace_text",
+        arguments_json='{"path":"app.py"}',
+    )
+    failed_test = ToolCall(
+        id="call-failed-test",
+        name="run_command",
+        arguments_json='{"argv":["pytest","-q"]}',
+    )
+    repair = ToolCall(
+        id="call-repair",
+        name="replace_text",
+        arguments_json='{"path":"app.py"}',
+    )
+    passed_test = ToolCall(
+        id="call-passed-test",
+        name="run_command",
+        arguments_json='{"argv":["pytest","-q"]}',
+    )
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(content=None, tool_calls=(first_change,)),
+            AssistantTurn(content=None, tool_calls=(failed_test,)),
+            AssistantTurn(content="The change is complete."),
+            AssistantTurn(content=None, tool_calls=(repair,)),
+            AssistantTurn(content=None, tool_calls=(passed_test,)),
+            AssistantTurn(content="The failure was fixed and tests now pass."),
+        ]
+    )
+    tools = FakeToolAdapter(
+        [
+            ToolResult(
+                call_id=first_change.id,
+                tool_name=first_change.name,
+                ok=True,
+                content="changed app.py",
+                metadata={"path": "app.py"},
+            ),
+            ToolResult(
+                call_id=failed_test.id,
+                tool_name=failed_test.name,
+                ok=False,
+                content="1 failed",
+                error_code="COMMAND_FAILED",
+                metadata={
+                    "argv": ("pytest", "-q"),
+                    "exit_code": 1,
+                    "timed_out": False,
+                },
+            ),
+            ToolResult(
+                call_id=repair.id,
+                tool_name=repair.name,
+                ok=True,
+                content="changed app.py",
+                metadata={"path": "app.py"},
+            ),
+            ToolResult(
+                call_id=passed_test.id,
+                tool_name=passed_test.name,
+                ok=True,
+                content="1 passed",
+                metadata={
+                    "argv": ("pytest", "-q"),
+                    "exit_code": 0,
+                    "timed_out": False,
+                },
+            ),
+        ],
+        definitions=(_definition("replace_text"), _definition("run_command")),
+    )
+    events = MemoryEventSink()
+    engine = AgentEngine(
+        model=model,
+        tools=tools,
+        max_steps=6,
+        events=EventBus((events,), run_id="run-repair"),
+    )
+
+    result = engine.run("Change app.py and fix any failing tests")
+
+    assert result.phase is AgentPhase.COMPLETE
+    assert result.model_steps == 6
+    assert result.final_response == "The failure was fixed and tests now pass."
+    fourth_request = model.requests[3].messages
+    assert fourth_request[-1].role is MessageRole.USER
+    assert "latest verification" in (fourth_request[-1].content or "")
+    rejected = [
+        event
+        for event in events.events
+        if event.kind is AgentEventKind.COMPLETION_REJECTED
+    ]
+    verified = [
+        event
+        for event in events.events
+        if event.kind is AgentEventKind.VERIFICATION_PASSED
+    ]
+    assert [event.details["reason"] for event in rejected] == [
+        "verification_failed"
+    ]
+    assert [event.details["verification_kind"] for event in verified] == [
+        "pytest"
+    ]
+
+
 def test_engine_publishes_a_deterministic_model_tool_model_event_sequence() -> None:
     call = ToolCall(id="call-read", name="read_file", arguments_json="{}")
     model = FakeModelAdapter(

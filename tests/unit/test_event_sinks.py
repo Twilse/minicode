@@ -59,6 +59,14 @@ def test_console_sink_renders_concise_event_lines() -> None:
         },
     )
     bus.publish(
+        AgentEventKind.COMPLETION_REJECTED,
+        model_step=1,
+        details={
+            "reason": "verification_required",
+            "modified_file_count": 2,
+        },
+    )
+    bus.publish(
         AgentEventKind.TOOL_CALLED,
         model_step=1,
         details={"tool_name": "read_file", "call_id": "call-1"},
@@ -74,6 +82,11 @@ def test_console_sink_renders_concise_event_lines() -> None:
         },
     )
     bus.publish(
+        AgentEventKind.VERIFICATION_PASSED,
+        model_step=1,
+        details={"verification_kind": "pytest"},
+    )
+    bus.publish(
         AgentEventKind.TASK_FAILED,
         model_step=1,
         details={"reason": "model_error", "message": "network unavailable"},
@@ -84,8 +97,10 @@ def test_console_sink_renders_concise_event_lines() -> None:
         "[MODEL] step 1 requested (2 messages)",
         "[MODEL] retry 1 after ModelConnectionError (0.5s)",
         "[CONTEXT] compacted 2000 -> 800 chars (4 messages omitted)",
+        "[REVIEW] final response rejected (verification_required; 2 modified files)",
         "[TOOL] read_file called (call_id=call-1)",
         "[TOOL] read_file failed (FILE_NOT_FOUND) (call_id=call-1)",
+        "[VERIFY] pytest passed",
         "[FAILED] model_error after 1 model steps: network unavailable",
     ]
 

@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from minicoder.application.completion import (
+    CompletionPolicy,
+    EvidenceBasedCompletionPolicy,
+    VerificationObservation,
+)
 from minicoder.application.context import ContextManager
 from minicoder.application.event_bus import EventBus
 from minicoder.application.ports import ModelPort, ToolPort
@@ -23,7 +28,8 @@ from minicoder.domain.state import (
 DEFAULT_SYSTEM_PROMPT = (
     "You are MiniCoder, a local coding agent. Use the available tools to inspect "
     "and modify only the configured workspace, run relevant checks, and return a "
-    "concise final response when the task is complete."
+    "concise final response when the task is complete. After changing files, run "
+    "relevant tests, compilation, or static checks before claiming completion."
 )
 
 
@@ -40,6 +46,7 @@ class AgentEngine:
         events: EventBus | None = None,
         context: ContextManager | None = None,
         retries: RetryStrategy | None = None,
+        completion: CompletionPolicy | None = None,
     ) -> None:
         if (
             not isinstance(max_steps, int)
@@ -62,6 +69,9 @@ class AgentEngine:
             if retries is None
             else retries
         )
+        self._completion = (
+            EvidenceBasedCompletionPolicy() if completion is None else completion
+        )
 
     def run(self, task: str) -> AgentRunResult:
         """Run one fresh task until final text, model failure, or the step limit."""
@@ -69,6 +79,7 @@ class AgentEngine:
         if not isinstance(task, str) or not task.strip():
             raise DomainValidationError("agent task must be non-blank text")
 
+        self._completion.reset()
         messages = [
             Message(role=MessageRole.SYSTEM, content=self._system_prompt),
             Message(role=MessageRole.USER, content=task),
@@ -92,6 +103,9 @@ class AgentEngine:
                     f"Agent reached the maximum of {self._max_steps} model steps "
                     "before returning a final response."
                 )
+                unfinished = self._completion.unfinished_summary()
+                if unfinished is not None:
+                    failure_message = f"{failure_message} {unfinished}"
                 self._events.publish(
                     AgentEventKind.TASK_FAILED,
                     model_step=state.model_steps,
@@ -193,6 +207,38 @@ class AgentEngine:
                             "content_chars": len(result.content),
                         },
                     )
+                    observation = self._completion.observe_tool(
+                        call,
+                        result,
+                        model_step=state.model_steps,
+                    )
+                    if observation is not None and observation.passed:
+                        self._record_verification_passed(observation)
+                continue
+
+            decision = self._completion.evaluate()
+            if not decision.accepted:
+                feedback = decision.feedback
+                if feedback is None:
+                    raise DomainValidationError(
+                        "rejected completion decisions require feedback"
+                    )
+                messages.append(
+                    Message(
+                        role=MessageRole.USER,
+                        content=feedback,
+                    )
+                )
+                state.require_revision()
+                self._events.publish(
+                    AgentEventKind.COMPLETION_REJECTED,
+                    model_step=state.model_steps,
+                    details={
+                        "reason": decision.reason.value,
+                        "modified_file_count": len(self._completion.modified_files),
+                        "response_chars": len(turn.content or ""),
+                    },
+                )
                 continue
 
             state.complete()
@@ -233,4 +279,14 @@ class AgentEngine:
                 "delay_seconds": attempt.delay_seconds,
                 "error_type": attempt.error_type,
             },
+        )
+
+    def _record_verification_passed(
+        self,
+        observation: VerificationObservation,
+    ) -> None:
+        self._events.publish(
+            AgentEventKind.VERIFICATION_PASSED,
+            model_step=observation.model_step,
+            details={"verification_kind": observation.kind},
         )

@@ -41,6 +41,11 @@ def _format_event(event: AgentEvent) -> str:
             f"{details['prepared_chars']} chars "
             f"({details['omitted_message_count']} messages omitted)"
         )
+    if event.kind is AgentEventKind.COMPLETION_REJECTED:
+        return (
+            f"[REVIEW] final response rejected ({details['reason']}; "
+            f"{details['modified_file_count']} modified files)"
+        )
     if event.kind is AgentEventKind.TOOL_CALLED:
         return (
             f"[TOOL] {details['tool_name']} called "
@@ -54,6 +59,8 @@ def _format_event(event: AgentEvent) -> str:
             f"[TOOL] {details['tool_name']} {status} "
             f"(call_id={details['call_id']})"
         )
+    if event.kind is AgentEventKind.VERIFICATION_PASSED:
+        return f"[VERIFY] {details['verification_kind']} passed"
     if event.kind is AgentEventKind.TASK_COMPLETED:
         return f"[DONE] completed after {event.model_step} model steps"
     if event.kind is AgentEventKind.TASK_FAILED:

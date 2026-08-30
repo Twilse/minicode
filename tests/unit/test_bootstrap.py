@@ -10,9 +10,10 @@ from minicoder.adapters.subprocess_runner import (
     PosixSubprocessAdapter,
     WindowsSubprocessAdapter,
 )
-from minicoder.bootstrap import ApplicationFactory
+from minicoder.application.completion import EvidenceBasedCompletionPolicy
 from minicoder.application.context import ContextManager
 from minicoder.application.retry import ExponentialBackoffRetryStrategy
+from minicoder.bootstrap import ApplicationFactory
 from minicoder.config import AppConfig
 from minicoder.domain.models import AssistantTurn, ToolCall
 from minicoder.domain.state import AgentPhase
@@ -158,6 +159,12 @@ def test_factory_selects_i09_context_and_retry_strategies(tmp_path: Path) -> Non
     assert isinstance(context, ContextManager)
     assert context.budget_chars == 4321
     assert isinstance(retries, ExponentialBackoffRetryStrategy)
+
+
+def test_factory_selects_the_evidence_based_completion_policy() -> None:
+    policy = ApplicationFactory.create_completion_policy()
+
+    assert isinstance(policy, EvidenceBasedCompletionPolicy)
 
 
 def test_factory_creates_one_shot_agent_session_with_injected_adapters(
