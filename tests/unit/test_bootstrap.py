@@ -19,7 +19,6 @@ from minicoder.tools.output import (
     StreamAwareOutputCompactor,
     ToolOutputArtifactStore,
 )
-from minicoder.tools.pipeline import ToolPipeline
 from tests.fakes import FakeModelAdapter
 
 
@@ -84,7 +83,7 @@ def test_factory_builds_workspace_scoped_file_tools(tmp_path: Path) -> None:
 
     artifacts = ToolOutputArtifactStore(max_read_chars=256)
     try:
-        tools = ApplicationFactory.create_tool_pipeline(
+        tools = ApplicationFactory.create_tool_registry(
             config,
             processes=PosixSubprocessAdapter(),
             artifacts=artifacts,
@@ -114,8 +113,6 @@ def test_factory_builds_workspace_scoped_file_tools(tmp_path: Path) -> None:
     )
     assert read_definition.parameters_schema["properties"]["limit"]["maximum"] == 512
     assert result.ok is True
-    assert isinstance(tools, ToolPipeline)
-    assert len(result.model_content()) <= config.max_tool_output_chars
     assert (tmp_path / "created.txt").read_text(encoding="utf-8") == "hello"
 
 

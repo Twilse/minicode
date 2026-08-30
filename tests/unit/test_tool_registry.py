@@ -10,15 +10,10 @@ from minicoder.domain.models import ToolCall, ToolDefinition, ToolResult
 from minicoder.tools.base import ToolCommand
 from minicoder.tools.registry import (
     INVALID_ARGUMENTS,
-    UNKNOWN_TOOL,
-    ToolRegistry,
-)
-from minicoder.tools.pipeline import (
     TOOL_CONTRACT_ERROR,
     TOOL_EXECUTION_ERROR,
-    ToolContractMiddleware,
-    ToolExceptionBoundary,
-    ToolPipeline,
+    UNKNOWN_TOOL,
+    ToolRegistry,
 )
 
 
@@ -70,13 +65,6 @@ class RecordingTool:
             ok=True,
             content=f"read {command.arguments['path']}",
         )
-
-
-def _guarded_registry(tool: RecordingTool) -> ToolPipeline:
-    return ToolPipeline(
-        ToolRegistry((tool,)),
-        middleware=(ToolExceptionBoundary(), ToolContractMiddleware()),
-    )
 
 
 def test_registry_exposes_definitions_and_dispatches_a_valid_command() -> None:
@@ -258,14 +246,14 @@ def test_compiled_schema_is_not_changed_by_later_nested_mutation() -> None:
     assert result.ok is True
 
 
-def test_pipeline_converts_an_unexpected_handler_exception_to_a_result() -> None:
+def test_registry_converts_an_unexpected_handler_exception_to_a_result() -> None:
     tool = RecordingTool()
 
     def explode(command: ToolCommand) -> ToolResult:
         raise RuntimeError(f"unexpected failure for {command.tool_name}")
 
     tool.execute = explode  # type: ignore[method-assign]
-    registry = _guarded_registry(tool)
+    registry = ToolRegistry((tool,))
 
     result = registry.execute(
         ToolCall(
@@ -298,11 +286,11 @@ def test_pipeline_converts_an_unexpected_handler_exception_to_a_result() -> None
         ),
     ],
 )
-def test_pipeline_rejects_results_that_break_the_tool_contract(
+def test_registry_rejects_results_that_break_the_tool_contract(
     returned_result: object,
 ) -> None:
     tool = RecordingTool(result=returned_result)  # type: ignore[arg-type]
-    registry = _guarded_registry(tool)
+    registry = ToolRegistry((tool,))
 
     result = registry.execute(
         ToolCall(
