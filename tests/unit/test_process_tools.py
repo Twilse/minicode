@@ -150,6 +150,23 @@ def test_run_command_preserves_explicit_verification_purpose(
     artifacts.close()
 
 
+def test_run_command_definition_guides_models_to_supported_verifiers(
+    tmp_path: Path,
+) -> None:
+    registry, artifacts = _registry(tmp_path, RecordingProcessAdapter())
+    try:
+        definition = next(
+            item for item in registry.definitions() if item.name == "run_command"
+        )
+    finally:
+        artifacts.close()
+
+    purpose = definition.parameters_schema["properties"]["purpose"]
+    assert "python -m pytest" in definition.description
+    assert "direct python script run is general" in definition.description
+    assert "direct application" in purpose["description"]
+
+
 def test_run_command_rejects_dangerous_command_before_process_execution(
     tmp_path: Path,
 ) -> None:

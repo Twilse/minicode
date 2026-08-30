@@ -220,6 +220,7 @@ def test_policy_recognizes_cross_platform_verification_commands(
         ("git", "status"),
         ("pytest", "--collect-only"),
         ("python", "-m", "pytest", "--help"),
+        ("python", "dijkstra.py"),
         ("ruff", "format", "."),
         ("npm", "install"),
     ],
@@ -233,7 +234,7 @@ def test_policy_rejects_commands_that_are_not_actual_verification(
     assert policy.observe_tool(command, result, model_step=1) is None
 
 
-def test_unknown_declared_verifier_stops_with_configuration_guidance() -> None:
+def test_unknown_declared_verifier_gets_one_correction_before_stopping() -> None:
     policy = EvidenceBasedCompletionPolicy()
     create = _call("create_file", '{"path":"main.zig"}')
     policy.observe_tool(
@@ -248,12 +249,58 @@ def test_unknown_declared_verifier_stops_with_configuration_guidance() -> None:
     )
 
     assert policy.observe_tool(command, result, model_step=2) is None
-    decision = policy.evaluate()
+    assert "not supported" in (policy.unfinished_summary() or "")
 
-    assert decision.accepted is False
-    assert decision.reason is CompletionReason.VERIFICATION_UNSUPPORTED
-    assert decision.terminal is True
-    assert ".minicoder.toml" in (decision.feedback or "")
+    first_decision = policy.evaluate()
+
+    assert first_decision.accepted is False
+    assert first_decision.reason is CompletionReason.VERIFICATION_UNSUPPORTED
+    assert first_decision.terminal is False
+    assert "python -m py_compile" in (first_decision.feedback or "")
+    assert "Directly running python <file>.py" in (
+        first_decision.feedback or ""
+    )
+
+    second_decision = policy.evaluate()
+
+    assert second_decision.accepted is False
+    assert second_decision.reason is CompletionReason.VERIFICATION_UNSUPPORTED
+    assert second_decision.terminal is True
+    assert ".minicoder.toml" in (second_decision.feedback or "")
+
+
+def test_new_mutation_restores_the_unsupported_verifier_correction() -> None:
+    policy = EvidenceBasedCompletionPolicy()
+    create = _call("create_file", '{"path":"main.py"}')
+    policy.observe_tool(
+        create,
+        _result(create, ok=True, metadata={"path": "main.py"}),
+        model_step=1,
+    )
+    first_command, first_result = _command_result(
+        ("python", "main.py"),
+        ok=True,
+        purpose="verification",
+    )
+    policy.observe_tool(first_command, first_result, model_step=2)
+    assert policy.evaluate().terminal is False
+    assert policy.evaluate().terminal is True
+
+    replace = _call("replace_text", '{"path":"main.py"}')
+    policy.observe_tool(
+        replace,
+        _result(replace, ok=True, metadata={"path": "main.py"}),
+        model_step=3,
+    )
+    second_command, second_result = _command_result(
+        ("python", "main.py"),
+        ok=True,
+        purpose="verification",
+        call_id="call-command-after-edit",
+    )
+    policy.observe_tool(second_command, second_result, model_step=4)
+
+    assert policy.evaluate().terminal is False
 
 
 def test_failed_unknown_declared_verifier_can_still_be_repaired() -> None:

@@ -146,7 +146,12 @@ in-session file edit from authorizing a new verifier. Review configuration
 changes and restart MiniCoder to load them. `--check-config` reports only the
 number of configured commands, not their contents.
 
-When a command explicitly marked for verification succeeds but is neither
-built in nor present in the startup snapshot, the task ends once with
-`verification_unsupported` and configuration guidance. It does not repeatedly
-reject the same final answer until the model-step limit is exhausted.
+When a successful command is marked for verification but is neither built in
+nor present in the startup snapshot, MiniCoder gives the model one correction
+opportunity and suggests recognized checks such as `python -m py_compile` or
+`python -m pytest`. A direct application run such as `python app.py` remains a
+general command because an application can hide a failed check and still exit
+successfully. If the model proposes completion again without obtaining
+recognized evidence for the same edit, the task ends with
+`verification_unsupported` and configuration guidance instead of consuming the
+remaining model-step budget.

@@ -51,6 +51,9 @@ def test_engine_completes_after_one_final_model_turn() -> None:
         MessageRole.ASSISTANT,
     ]
     assert model.requests[0].tools == (_definition(),)
+    system_prompt = model.requests[0].messages[0].content or ""
+    assert "recognized test or compiler" in system_prompt
+    assert "direct application runs are general" in system_prompt
 
 
 def test_engine_plans_without_tools_before_following_the_plan() -> None:
@@ -625,7 +628,7 @@ def test_engine_reports_unverified_work_when_step_limit_is_reached() -> None:
     assert "completion policy" in (result.messages[-1].content or "")
 
 
-def test_engine_stops_once_for_an_unsupported_declared_verifier() -> None:
+def test_engine_stops_if_the_unsupported_verifier_correction_is_ignored() -> None:
     mutation = ToolCall(
         id="call-create-zig",
         name="create_file",
@@ -643,6 +646,7 @@ def test_engine_stops_once_for_an_unsupported_declared_verifier() -> None:
             AssistantTurn(content=None, tool_calls=(mutation,)),
             AssistantTurn(content=None, tool_calls=(verification,)),
             AssistantTurn(content="The Zig build passed."),
+            AssistantTurn(content="The Zig build is still complete."),
         ]
     )
     tools = FakeToolAdapter(
@@ -682,14 +686,127 @@ def test_engine_stops_once_for_an_unsupported_declared_verifier() -> None:
 
     assert result.phase is AgentPhase.FAILED
     assert result.stop_reason is AgentStopReason.VERIFICATION_UNSUPPORTED
-    assert result.model_steps == 3
+    assert result.model_steps == 4
     assert ".minicoder.toml" in (result.failure_message or "")
     assert result.messages[-1].role is MessageRole.ASSISTANT
-    assert AgentEventKind.COMPLETION_REJECTED not in {
-        event.kind for event in events.events
-    }
+    rejected = [
+        event
+        for event in events.events
+        if event.kind is AgentEventKind.COMPLETION_REJECTED
+    ]
+    assert len(rejected) == 1
+    assert rejected[0].details["reason"] == "verification_unsupported"
+    correction = model.requests[3].messages[-1]
+    assert correction.role is MessageRole.USER
+    assert "python -m py_compile" in (correction.content or "")
     assert events.events[-1].kind is AgentEventKind.TASK_FAILED
     assert events.events[-1].details["reason"] == "verification_unsupported"
+
+
+def test_engine_recovers_from_direct_python_run_with_supported_check() -> None:
+    mutation = ToolCall(
+        id="call-create-python",
+        name="create_file",
+        arguments_json='{"path":"dijkstra.py"}',
+    )
+    direct_run = ToolCall(
+        id="call-direct-python",
+        name="run_command",
+        arguments_json=(
+            '{"argv":["python","dijkstra.py"],"purpose":"verification"}'
+        ),
+    )
+    py_compile = ToolCall(
+        id="call-py-compile",
+        name="run_command",
+        arguments_json=(
+            '{"argv":["python","-m","py_compile","dijkstra.py"],'
+            '"purpose":"verification"}'
+        ),
+    )
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(content=None, tool_calls=(mutation,)),
+            AssistantTurn(content=None, tool_calls=(direct_run,)),
+            AssistantTurn(content="The example and assertions passed."),
+            AssistantTurn(content=None, tool_calls=(py_compile,)),
+            AssistantTurn(content="The implementation is now verified."),
+        ]
+    )
+    tools = FakeToolAdapter(
+        [
+            ToolResult(
+                call_id=mutation.id,
+                tool_name=mutation.name,
+                ok=True,
+                content="created dijkstra.py",
+                metadata={"path": "dijkstra.py"},
+            ),
+            ToolResult(
+                call_id=direct_run.id,
+                tool_name=direct_run.name,
+                ok=True,
+                content="assertions passed",
+                metadata={
+                    "argv": ("/runtime/python", "dijkstra.py"),
+                    "requested_argv": ("python", "dijkstra.py"),
+                    "purpose": "verification",
+                    "exit_code": 0,
+                    "timed_out": False,
+                },
+            ),
+            ToolResult(
+                call_id=py_compile.id,
+                tool_name=py_compile.name,
+                ok=True,
+                content="compiled",
+                metadata={
+                    "argv": (
+                        "/runtime/python",
+                        "-m",
+                        "py_compile",
+                        "dijkstra.py",
+                    ),
+                    "requested_argv": (
+                        "python",
+                        "-m",
+                        "py_compile",
+                        "dijkstra.py",
+                    ),
+                    "purpose": "verification",
+                    "exit_code": 0,
+                    "timed_out": False,
+                },
+            ),
+        ],
+        definitions=(_definition("create_file"), _definition("run_command")),
+    )
+    events = MemoryEventSink()
+    engine = AgentEngine(
+        model=model,
+        tools=tools,
+        max_steps=6,
+        events=EventBus((events,), run_id="run-verifier-correction"),
+    )
+
+    result = engine.run("Create a Dijkstra example")
+
+    assert result.phase is AgentPhase.COMPLETE
+    assert result.model_steps == 5
+    assert tools.calls == [mutation, direct_run, py_compile]
+    correction = model.requests[3].messages[-1]
+    assert correction.role is MessageRole.USER
+    assert "One correction attempt" in (correction.content or "")
+    assert [
+        event.details["reason"]
+        for event in events.events
+        if event.kind is AgentEventKind.COMPLETION_REJECTED
+    ] == ["verification_unsupported"]
+    assert any(
+        event.kind is AgentEventKind.VERIFICATION_PASSED
+        and event.details["verification_kind"] == "py_compile"
+        for event in events.events
+    )
 
 
 def test_engine_requires_repair_after_failed_verification() -> None:

@@ -65,7 +65,10 @@ class RunCommandTool:
                 "Run a non-interactive command in the workspace using an argv list. "
                 "Shell syntax such as pipes, redirects, and && is not supported. "
                 "Set purpose to verification when the command is intended to test, "
-                "build, compile, or statically check changed code."
+                "build, compile, or statically check changed code. Prefer recognized "
+                "verifiers such as pytest, python -m pytest/unittest/py_compile/"
+                "compileall, supported build tools, or a startup-configured exact "
+                "command. A direct python script run is general, not verification."
             ),
             parameters_schema={
                 "type": "object",
@@ -89,7 +92,10 @@ class RunCommandTool:
                         "default": COMMAND_PURPOSE_GENERAL,
                         "description": (
                             "Whether this command supplies completion verification "
-                            "evidence or performs a general inspection/action."
+                            "evidence or performs a general inspection/action. Use "
+                            "verification only for a recognized test, build, compile, "
+                            "or static-check command; direct application or example "
+                            "execution is general unless configured at startup."
                         ),
                     },
                 },

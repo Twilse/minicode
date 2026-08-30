@@ -67,6 +67,14 @@ def test_console_sink_renders_concise_event_lines() -> None:
         },
     )
     bus.publish(
+        AgentEventKind.COMPLETION_REJECTED,
+        model_step=1,
+        details={
+            "reason": "verification_unsupported",
+            "modified_file_count": 2,
+        },
+    )
+    bus.publish(
         AgentEventKind.TOOL_CALLED,
         model_step=1,
         details={"tool_name": "read_file", "call_id": "call-1"},
@@ -98,6 +106,7 @@ def test_console_sink_renders_concise_event_lines() -> None:
         "[重试] 模型服务暂时不可用，0.5 秒后进行第 1 次重试",
         "[上下文] 对话较长，已整理早期内容",
         "[检查] 文件已经修改，正在补充验证…",
+        "[检查] 当前验证方式未识别，正在改用受支持的验证命令…",
         "[操作] 正在读取文件…",
         "[注意] 读取文件未成功；结果已返回给 MiniCoder",
         "[验证] pytest 测试已通过",

@@ -117,6 +117,7 @@ class EvidenceBasedCompletionPolicy:
         self._last_verification_generation: int | None = None
         self._last_verification_passed: bool | None = None
         self._unsupported_verification_generation: int | None = None
+        self._unsupported_correction_generation: int | None = None
 
     def observe_tool(
         self,
@@ -132,6 +133,7 @@ class EvidenceBasedCompletionPolicy:
             self._mutation_generation += 1
             self._last_mutation_step = model_step
             self._unsupported_verification_generation = None
+            self._unsupported_correction_generation = None
 
         classification = self._verification.classify(result)
         if classification is None:
@@ -158,6 +160,7 @@ class EvidenceBasedCompletionPolicy:
         self._last_verification_generation = self._mutation_generation
         self._last_verification_passed = passed
         self._unsupported_verification_generation = None
+        self._unsupported_correction_generation = None
         if passed:
             self._last_successful_verification_step = model_step
         return VerificationObservation(
@@ -203,14 +206,40 @@ class EvidenceBasedCompletionPolicy:
             self._unsupported_verification_generation
             == self._mutation_generation
         ):
+            if (
+                self._unsupported_correction_generation
+                != self._mutation_generation
+            ):
+                self._unsupported_correction_generation = (
+                    self._mutation_generation
+                )
+                return CompletionDecision(
+                    accepted=False,
+                    reason=CompletionReason.VERIFICATION_UNSUPPORTED,
+                    feedback=(
+                        "[MiniCoder completion policy]\n"
+                        "The completed command was marked as verification, but "
+                        "MiniCoder does not recognize it as reliable completion "
+                        "evidence. One correction attempt is available. For Python, "
+                        "use pytest, python -m pytest, python -m unittest, python -m "
+                        "py_compile <file>, or python -m compileall. Directly running "
+                        "python <file>.py remains a general command because an "
+                        "arbitrary script may hide failures and still exit zero. "
+                        "Run a supported check after the latest change before "
+                        "returning a final response. For another project-specific "
+                        "verifier, add its exact argv to [verification].commands in "
+                        ".minicoder.toml, review it, and start a new session."
+                    ),
+                )
             return CompletionDecision(
                 accepted=False,
                 reason=CompletionReason.VERIFICATION_UNSUPPORTED,
                 feedback=(
-                    "A command marked for verification completed, but MiniCoder "
-                    "does not recognize it as built-in or startup-configured "
-                    "verification. Add its exact argv to [verification].commands "
-                    "in .minicoder.toml, review that file, and start a new session."
+                    "The verification correction opportunity was already used, but "
+                    "the latest change still has no successful built-in or "
+                    "startup-configured verification. Add the required exact argv "
+                    "to [verification].commands in .minicoder.toml, review that "
+                    "file, and start a new session."
                 ),
                 terminal=True,
             )
@@ -229,13 +258,21 @@ class EvidenceBasedCompletionPolicy:
         )
 
     def unfinished_summary(self) -> str | None:
-        decision = self.evaluate()
-        if decision.accepted:
+        if self._mutation_generation == 0 or (
+            self._last_verification_generation == self._mutation_generation
+            and self._last_verification_passed is True
+        ):
             return None
         files = _display_files(self.modified_files)
-        if decision.reason is CompletionReason.VERIFICATION_FAILED:
+        if (
+            self._last_verification_generation == self._mutation_generation
+            and self._last_verification_passed is False
+        ):
             return f"Latest verification failed after the most recent change{files}."
-        if decision.reason is CompletionReason.VERIFICATION_UNSUPPORTED:
+        if (
+            self._unsupported_verification_generation
+            == self._mutation_generation
+        ):
             return "The attempted verification method is not supported in this session."
         return f"Modified work was not verified after the latest change{files}."
 

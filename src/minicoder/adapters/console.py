@@ -104,6 +104,8 @@ def _completion_message(reason: str) -> str:
         return "[检查] 文件已经修改，正在补充验证…"
     if reason == "verification_failed":
         return "[检查] 验证未通过，正在继续修复…"
+    if reason == "verification_unsupported":
+        return "[检查] 当前验证方式未识别，正在改用受支持的验证命令…"
     return "[检查] 当前结果尚未满足完成条件，正在继续处理…"
 
 
