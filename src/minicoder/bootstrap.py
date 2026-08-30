@@ -15,12 +15,17 @@ from minicoder.adapters.subprocess_runner import (
     WindowsSubprocessAdapter,
 )
 from minicoder.application.agent_engine import AgentEngine
+from minicoder.application.context import ContextManager
 from minicoder.application.event_bus import EventBus, EventDeliveryFailure
 from minicoder.application.ports import (
     EventSinkPort,
     ModelPort,
     ProcessPort,
     ToolPort,
+)
+from minicoder.application.retry import (
+    ExponentialBackoffRetryStrategy,
+    RetryStrategy,
 )
 from minicoder.config import AppConfig
 from minicoder.domain.state import AgentRunResult
@@ -142,6 +147,22 @@ class ApplicationFactory:
         return StreamAwareOutputCompactor()
 
     @staticmethod
+    def create_context_manager(config: AppConfig) -> ContextManager:
+        """Create deterministic context budgeting from provider-neutral config."""
+
+        return ContextManager(budget_chars=config.context_budget_chars)
+
+    @staticmethod
+    def create_retry_strategy() -> RetryStrategy:
+        """Create the single visible policy for transient model failures."""
+
+        return ExponentialBackoffRetryStrategy(
+            max_retries=2,
+            initial_delay_seconds=0.5,
+            multiplier=2.0,
+        )
+
+    @staticmethod
     def create_tool_registry(
         config: AppConfig,
         *,
@@ -210,6 +231,8 @@ class ApplicationFactory:
                 tools=tools,
                 max_steps=config.max_steps,
                 events=events,
+                context=ApplicationFactory.create_context_manager(config),
+                retries=ApplicationFactory.create_retry_strategy(),
             )
         except Exception:
             artifacts.close()

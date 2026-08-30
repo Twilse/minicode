@@ -3,8 +3,10 @@ import json
 import pytest
 
 from minicoder.application.agent_engine import AgentEngine
+from minicoder.application.context import ContextManager, conversation_char_count
 from minicoder.application.event_bus import EventBus
-from minicoder.domain.errors import ModelConnectionError
+from minicoder.application.retry import ExponentialBackoffRetryStrategy
+from minicoder.domain.errors import ModelConnectionError, ModelServiceError
 from minicoder.domain.events import AgentEventKind
 from minicoder.domain.models import (
     AssistantTurn,
@@ -190,6 +192,93 @@ def test_engine_turns_expected_model_errors_into_a_failed_result() -> None:
         MessageRole.SYSTEM,
         MessageRole.USER,
     ]
+
+
+def test_engine_retries_transient_failure_without_consuming_an_agent_step() -> None:
+    class FlakyModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete(self, **_: object) -> AssistantTurn:
+            self.calls += 1
+            if self.calls == 1:
+                raise ModelServiceError("temporary outage")
+            return AssistantTurn(content="recovered")
+
+    model = FlakyModel()
+    sleeps: list[float] = []
+    events = MemoryEventSink()
+    engine = AgentEngine(
+        model=model,
+        tools=FakeToolAdapter(),
+        max_steps=2,
+        retries=ExponentialBackoffRetryStrategy(
+            max_retries=2,
+            initial_delay_seconds=0.25,
+            sleeper=sleeps.append,
+        ),
+        events=EventBus((events,), run_id="run-retry"),
+    )
+
+    result = engine.run("Try the model")
+
+    assert result.phase is AgentPhase.COMPLETE
+    assert result.model_steps == 1
+    assert model.calls == 2
+    assert sleeps == [0.25]
+    assert [event.kind for event in events.events] == [
+        AgentEventKind.TASK_STARTED,
+        AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.MODEL_RETRY_SCHEDULED,
+        AgentEventKind.TASK_COMPLETED,
+    ]
+    assert events.events[2].details == {
+        "retry_number": 1,
+        "delay_seconds": 0.25,
+        "error_type": "ModelServiceError",
+    }
+
+
+def test_engine_compacts_only_the_model_snapshot_and_keeps_full_run_history() -> None:
+    call = ToolCall(id="call-large", name="read_file", arguments_json="{}")
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(
+                content=None,
+                tool_calls=(call,),
+                reasoning_content="required latest reasoning",
+            ),
+            AssistantTurn(content="done"),
+        ]
+    )
+    large_result = ToolResult(
+        call_id=call.id,
+        tool_name=call.name,
+        ok=True,
+        content="start\n" + "x" * 4_000 + "\nfinish",
+    )
+    tools = FakeToolAdapter([large_result], definitions=(_definition(),))
+    events = MemoryEventSink()
+    engine = AgentEngine(
+        model=model,
+        tools=tools,
+        max_steps=3,
+        context=ContextManager(budget_chars=450),
+        events=EventBus((events,), run_id="run-context"),
+    )
+
+    result = engine.run("Read a very large file")
+
+    second_request = model.requests[1].messages
+    assert result.phase is AgentPhase.COMPLETE
+    assert conversation_char_count(second_request) <= 450
+    assert second_request[-2].reasoning_content == "required latest reasoning"
+    assert len(result.messages[3].content or "") > len(second_request[-1].content or "")
+    kinds = [event.kind for event in events.events]
+    assert kinds.count(AgentEventKind.CONTEXT_COMPACTED) == 1
+    compacted_index = kinds.index(AgentEventKind.CONTEXT_COMPACTED)
+    assert kinds[compacted_index + 1] is AgentEventKind.MODEL_REQUESTED
+    assert events.events[compacted_index].details["shortened_message_count"] == 1
 
 
 def test_engine_publishes_a_deterministic_model_tool_model_event_sequence() -> None:

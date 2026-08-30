@@ -19,6 +19,8 @@ class AgentEventKind(str, Enum):
 
     TASK_STARTED = "task_started"
     MODEL_REQUESTED = "model_requested"
+    MODEL_RETRY_SCHEDULED = "model_retry_scheduled"
+    CONTEXT_COMPACTED = "context_compacted"
     TOOL_CALLED = "tool_called"
     TOOL_FINISHED = "tool_finished"
     TASK_COMPLETED = "task_completed"

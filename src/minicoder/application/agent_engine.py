@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+from minicoder.application.context import ContextManager
 from minicoder.application.event_bus import EventBus
 from minicoder.application.ports import ModelPort, ToolPort
+from minicoder.application.retry import (
+    ExponentialBackoffRetryStrategy,
+    RetryAttempt,
+    RetryStrategy,
+)
 from minicoder.domain.errors import DomainValidationError, ModelError
 from minicoder.domain.events import AgentEventKind
 from minicoder.domain.models import Message, MessageRole
@@ -32,6 +38,8 @@ class AgentEngine:
         max_steps: int,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
         events: EventBus | None = None,
+        context: ContextManager | None = None,
+        retries: RetryStrategy | None = None,
     ) -> None:
         if (
             not isinstance(max_steps, int)
@@ -46,6 +54,14 @@ class AgentEngine:
         self._max_steps = max_steps
         self._system_prompt = system_prompt
         self._events = EventBus() if events is None else events
+        self._context = (
+            ContextManager(budget_chars=60_000) if context is None else context
+        )
+        self._retries = (
+            ExponentialBackoffRetryStrategy(max_retries=0)
+            if retries is None
+            else retries
+        )
 
     def run(self, task: str) -> AgentRunResult:
         """Run one fresh task until final text, model failure, or the step limit."""
@@ -93,18 +109,38 @@ class AgentEngine:
                 )
 
             state.begin_model_call()
+            window = self._context.prepare(messages)
+            if window.compacted:
+                self._events.publish(
+                    AgentEventKind.CONTEXT_COMPACTED,
+                    model_step=state.model_steps,
+                    details={
+                        "budget_chars": window.budget_chars,
+                        "original_chars": window.original_chars,
+                        "prepared_chars": window.prepared_chars,
+                        "omitted_message_count": window.omitted_message_count,
+                        "shortened_message_count": window.shortened_message_count,
+                        "budget_exceeded": window.budget_exceeded,
+                    },
+                )
             self._events.publish(
                 AgentEventKind.MODEL_REQUESTED,
                 model_step=state.model_steps,
                 details={
-                    "message_count": len(messages),
+                    "message_count": len(window.messages),
                     "tool_count": len(definitions),
                 },
             )
             try:
-                turn = self._model.complete(
-                    messages=tuple(messages),
-                    tools=definitions,
+                turn = self._retries.run(
+                    lambda: self._model.complete(
+                        messages=window.messages,
+                        tools=definitions,
+                    ),
+                    on_retry=lambda attempt: self._record_model_retry(
+                        state,
+                        attempt,
+                    ),
                 )
             except KeyboardInterrupt:
                 self._record_user_interruption(state)
@@ -181,5 +217,20 @@ class AgentEngine:
             details={
                 "reason": AgentStopReason.USER_INTERRUPTED.value,
                 "message": "Agent task was interrupted by the user.",
+            },
+        )
+
+    def _record_model_retry(
+        self,
+        state: AgentStateMachine,
+        attempt: RetryAttempt,
+    ) -> None:
+        self._events.publish(
+            AgentEventKind.MODEL_RETRY_SCHEDULED,
+            model_step=state.model_steps,
+            details={
+                "retry_number": attempt.retry_number,
+                "delay_seconds": attempt.delay_seconds,
+                "error_type": attempt.error_type,
             },
         )

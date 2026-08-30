@@ -30,6 +30,17 @@ def _format_event(event: AgentEvent) -> str:
             f"[MODEL] step {event.model_step} requested "
             f"({details['message_count']} messages)"
         )
+    if event.kind is AgentEventKind.MODEL_RETRY_SCHEDULED:
+        return (
+            f"[MODEL] retry {details['retry_number']} after "
+            f"{details['error_type']} ({details['delay_seconds']}s)"
+        )
+    if event.kind is AgentEventKind.CONTEXT_COMPACTED:
+        return (
+            f"[CONTEXT] compacted {details['original_chars']} -> "
+            f"{details['prepared_chars']} chars "
+            f"({details['omitted_message_count']} messages omitted)"
+        )
     if event.kind is AgentEventKind.TOOL_CALLED:
         return (
             f"[TOOL] {details['tool_name']} called "

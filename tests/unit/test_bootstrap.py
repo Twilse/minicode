@@ -11,6 +11,8 @@ from minicoder.adapters.subprocess_runner import (
     WindowsSubprocessAdapter,
 )
 from minicoder.bootstrap import ApplicationFactory
+from minicoder.application.context import ContextManager
+from minicoder.application.retry import ExponentialBackoffRetryStrategy
 from minicoder.config import AppConfig
 from minicoder.domain.models import AssistantTurn, ToolCall
 from minicoder.domain.state import AgentPhase
@@ -137,6 +139,25 @@ def test_factory_selects_stream_aware_output_compactor() -> None:
     compactor = ApplicationFactory.create_output_compactor()
 
     assert isinstance(compactor, StreamAwareOutputCompactor)
+
+
+def test_factory_selects_i09_context_and_retry_strategies(tmp_path: Path) -> None:
+    config = AppConfig.from_environment(
+        {
+            "MINICODER_API_KEY": "secret-key",
+            "MINICODER_BASE_URL": "https://models.example.com/v1",
+            "MINICODER_MODEL": "coding-model",
+            "MINICODER_CONTEXT_BUDGET_CHARS": "4321",
+        },
+        workspace=tmp_path,
+    )
+
+    context = ApplicationFactory.create_context_manager(config)
+    retries = ApplicationFactory.create_retry_strategy()
+
+    assert isinstance(context, ContextManager)
+    assert context.budget_chars == 4321
+    assert isinstance(retries, ExponentialBackoffRetryStrategy)
 
 
 def test_factory_creates_one_shot_agent_session_with_injected_adapters(

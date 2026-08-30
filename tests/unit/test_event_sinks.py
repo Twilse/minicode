@@ -41,6 +41,24 @@ def test_console_sink_renders_concise_event_lines() -> None:
         details={"message_count": 2},
     )
     bus.publish(
+        AgentEventKind.MODEL_RETRY_SCHEDULED,
+        model_step=1,
+        details={
+            "retry_number": 1,
+            "error_type": "ModelConnectionError",
+            "delay_seconds": 0.5,
+        },
+    )
+    bus.publish(
+        AgentEventKind.CONTEXT_COMPACTED,
+        model_step=1,
+        details={
+            "original_chars": 2_000,
+            "prepared_chars": 800,
+            "omitted_message_count": 4,
+        },
+    )
+    bus.publish(
         AgentEventKind.TOOL_CALLED,
         model_step=1,
         details={"tool_name": "read_file", "call_id": "call-1"},
@@ -64,6 +82,8 @@ def test_console_sink_renders_concise_event_lines() -> None:
     assert output.getvalue().splitlines() == [
         "[TASK] started (7 tools, max 20 model steps)",
         "[MODEL] step 1 requested (2 messages)",
+        "[MODEL] retry 1 after ModelConnectionError (0.5s)",
+        "[CONTEXT] compacted 2000 -> 800 chars (4 messages omitted)",
         "[TOOL] read_file called (call_id=call-1)",
         "[TOOL] read_file failed (FILE_NOT_FOUND) (call_id=call-1)",
         "[FAILED] model_error after 1 model steps: network unavailable",
