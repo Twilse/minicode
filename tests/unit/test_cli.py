@@ -29,8 +29,57 @@ def test_check_config_prints_safe_summary(tmp_path: Path) -> None:
     assert exit_code == 0
     assert "configuration is valid" in stdout.getvalue()
     assert "deepseek-v4-pro" in stdout.getvalue()
+    assert "verification_commands=0" in stdout.getvalue()
     assert "never-print-this" not in stdout.getvalue()
     assert stderr.getvalue() == ""
+
+
+def test_check_config_validates_and_counts_project_verifiers(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".minicoder.toml").write_text(
+        "[verification]\ncommands = [['zig', 'build', 'test']]\n",
+        encoding="utf-8",
+    )
+    stdout = StringIO()
+    stderr = StringIO()
+
+    exit_code = main(
+        ["--check-config", "--workspace", str(tmp_path)],
+        environ={
+            "MINICODER_API_KEY": "secret",
+            "MINICODER_BASE_URL": "https://models.example.com/v1",
+            "MINICODER_MODEL": "model",
+        },
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert exit_code == 0
+    assert "verification_commands=1" in stdout.getvalue()
+    assert stderr.getvalue() == ""
+
+
+def test_check_config_rejects_invalid_project_verifiers(tmp_path: Path) -> None:
+    (tmp_path / ".minicoder.toml").write_text(
+        "[verification]\ncommands = 'pytest'\n",
+        encoding="utf-8",
+    )
+    stderr = StringIO()
+
+    exit_code = main(
+        ["--check-config", "--workspace", str(tmp_path)],
+        environ={
+            "MINICODER_API_KEY": "secret",
+            "MINICODER_BASE_URL": "https://models.example.com/v1",
+            "MINICODER_MODEL": "model",
+        },
+        stdout=StringIO(),
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+    assert "verification.commands must be an array" in stderr.getvalue()
 
 
 def test_check_config_returns_two_for_user_configuration_error(

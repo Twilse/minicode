@@ -117,6 +117,36 @@ def test_run_command_uses_normalized_argv_fixed_workspace_and_timeout(
         "pytest",
         "-q",
     )
+    assert result.metadata["requested_argv"] == (
+        "python3",
+        "-m",
+        "pytest",
+        "-q",
+    )
+    assert result.metadata["purpose"] == "general"
+    artifacts.close()
+
+
+def test_run_command_preserves_explicit_verification_purpose(
+    tmp_path: Path,
+) -> None:
+    process = RecordingProcessAdapter()
+    registry, artifacts = _registry(tmp_path, process)
+
+    result = _execute(
+        registry,
+        "run_command",
+        {"argv": ["g++", "main.cpp", "-o", "main"], "purpose": "verification"},
+    )
+
+    assert result.ok is True
+    assert result.metadata["purpose"] == "verification"
+    assert result.metadata["requested_argv"] == (
+        "g++",
+        "main.cpp",
+        "-o",
+        "main",
+    )
     artifacts.close()
 
 
@@ -293,6 +323,7 @@ def test_read_tool_output_rejects_a_forged_id(tmp_path: Path) -> None:
         {"argv": "pytest -q"},
         {"argv": []},
         {"argv": ["pytest"], "extra": True},
+        {"argv": ["pytest"], "purpose": "testing"},
     ],
 )
 def test_run_command_schema_rejects_invalid_arguments(

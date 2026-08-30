@@ -15,6 +15,7 @@ from minicoder.adapters.subprocess_runner import (
     PosixSubprocessAdapter,
     WindowsSubprocessAdapter,
 )
+from minicoder.adapters.verification_config import load_verification_commands
 from minicoder.application.agent_engine import AgentEngine
 from minicoder.application.completion import (
     CompletionPolicy,
@@ -31,6 +32,10 @@ from minicoder.application.ports import (
 from minicoder.application.retry import (
     ExponentialBackoffRetryStrategy,
     RetryStrategy,
+)
+from minicoder.application.verification import (
+    CommandVerificationClassifier,
+    ConfiguredVerificationCommand,
 )
 from minicoder.config import AppConfig
 from minicoder.domain.models import Message
@@ -60,6 +65,9 @@ class BootstrapContext:
 
     config: AppConfig
     operating_system: OperatingSystem
+    verification_commands: tuple[
+        ConfiguredVerificationCommand, ...
+    ]  # Exact project verifiers frozen at startup.
 
 
 class AgentSession:
@@ -148,9 +156,11 @@ class ApplicationFactory:
     ) -> BootstrapContext:
         config = AppConfig.from_environment(environ, workspace=workspace)
         operating_system = detect_operating_system(platform_name)
+        verification_commands = load_verification_commands(config.workspace)
         return BootstrapContext(
             config=config,
             operating_system=operating_system,
+            verification_commands=verification_commands,
         )
 
     @staticmethod
@@ -189,10 +199,14 @@ class ApplicationFactory:
         return ContextManager(budget_chars=config.context_budget_chars)
 
     @staticmethod
-    def create_completion_policy() -> CompletionPolicy:
+    def create_completion_policy(
+        configured_commands: Sequence[ConfiguredVerificationCommand] = (),
+    ) -> CompletionPolicy:
         """Create the host-side evidence gate for final model responses."""
 
-        return EvidenceBasedCompletionPolicy()
+        return EvidenceBasedCompletionPolicy(
+            verification=CommandVerificationClassifier(configured_commands),
+        )
 
     @staticmethod
     def create_retry_strategy() -> RetryStrategy:
@@ -275,7 +289,9 @@ class ApplicationFactory:
                 events=events,
                 context=ApplicationFactory.create_context_manager(config),
                 retries=ApplicationFactory.create_retry_strategy(),
-                completion=ApplicationFactory.create_completion_policy(),
+                completion=ApplicationFactory.create_completion_policy(
+                    context.verification_commands,
+                ),
             )
         except Exception:
             artifacts.close()

@@ -8,6 +8,10 @@ from minicoder.application.completion import (
     CompletionReason,
     EvidenceBasedCompletionPolicy,
 )
+from minicoder.application.verification import (
+    CommandVerificationClassifier,
+    ConfiguredVerificationCommand,
+)
 from minicoder.domain.models import ToolCall, ToolResult
 
 
@@ -45,16 +49,23 @@ def _command_result(
     *,
     ok: bool,
     call_id: str = "call-command",
+    purpose: str | None = None,
+    requested_argv: Sequence[str] | None = None,
 ) -> tuple[ToolCall, ToolResult]:
     call = _call("run_command", call_id=call_id)
+    metadata: dict[str, object] = {
+        "argv": tuple(argv),
+        "exit_code": 0 if ok else 1,
+        "timed_out": False,
+    }
+    if purpose is not None:
+        metadata["purpose"] = purpose
+    if requested_argv is not None:
+        metadata["requested_argv"] = tuple(requested_argv)
     return call, _result(
         call,
         ok=ok,
-        metadata={
-            "argv": tuple(argv),
-            "exit_code": 0 if ok else 1,
-            "timed_out": False,
-        },
+        metadata=metadata,
     )
 
 
@@ -220,6 +231,115 @@ def test_policy_rejects_commands_that_are_not_actual_verification(
     command, result = _command_result(argv, ok=True)
 
     assert policy.observe_tool(command, result, model_step=1) is None
+
+
+def test_unknown_declared_verifier_stops_with_configuration_guidance() -> None:
+    policy = EvidenceBasedCompletionPolicy()
+    create = _call("create_file", '{"path":"main.zig"}')
+    policy.observe_tool(
+        create,
+        _result(create, ok=True, metadata={"path": "main.zig"}),
+        model_step=1,
+    )
+    command, result = _command_result(
+        ("zig", "build", "test"),
+        ok=True,
+        purpose="verification",
+    )
+
+    assert policy.observe_tool(command, result, model_step=2) is None
+    decision = policy.evaluate()
+
+    assert decision.accepted is False
+    assert decision.reason is CompletionReason.VERIFICATION_UNSUPPORTED
+    assert decision.terminal is True
+    assert ".minicoder.toml" in (decision.feedback or "")
+
+
+def test_failed_unknown_declared_verifier_can_still_be_repaired() -> None:
+    policy = EvidenceBasedCompletionPolicy()
+    create = _call("create_file", '{"path":"main.zig"}')
+    policy.observe_tool(
+        create,
+        _result(create, ok=True, metadata={"path": "main.zig"}),
+        model_step=1,
+    )
+    command, result = _command_result(
+        ("zig", "build", "test"),
+        ok=False,
+        purpose="verification",
+    )
+
+    policy.observe_tool(command, result, model_step=2)
+    decision = policy.evaluate()
+
+    assert decision.reason is CompletionReason.VERIFICATION_REQUIRED
+    assert decision.terminal is False
+
+
+def test_unmarked_unknown_command_does_not_become_verification() -> None:
+    policy = EvidenceBasedCompletionPolicy()
+    create = _call("create_file", '{"path":"notes.txt"}')
+    policy.observe_tool(
+        create,
+        _result(create, ok=True, metadata={"path": "notes.txt"}),
+        model_step=1,
+    )
+    command, result = _command_result(("echo", "done"), ok=True)
+
+    policy.observe_tool(command, result, model_step=2)
+
+    assert policy.evaluate().reason is CompletionReason.VERIFICATION_REQUIRED
+
+
+def test_configured_exact_command_supplies_verification_evidence() -> None:
+    policy = EvidenceBasedCompletionPolicy(
+        verification=CommandVerificationClassifier(
+            (ConfiguredVerificationCommand(("zig", "build", "test")),)
+        )
+    )
+    create = _call("create_file", '{"path":"main.zig"}')
+    policy.observe_tool(
+        create,
+        _result(create, ok=True, metadata={"path": "main.zig"}),
+        model_step=1,
+    )
+    command, result = _command_result(
+        ("zig", "build", "test"),
+        ok=True,
+    )
+
+    observation = policy.observe_tool(command, result, model_step=2)
+
+    assert observation is not None
+    assert observation.kind == "configured verifier"
+    assert policy.evaluate().reason is CompletionReason.VERIFIED
+
+
+def test_unknown_runtime_command_does_not_override_a_successful_compile() -> None:
+    policy = EvidenceBasedCompletionPolicy()
+    create = _call("create_file", '{"path":"main.cpp"}')
+    policy.observe_tool(
+        create,
+        _result(create, ok=True, metadata={"path": "main.cpp"}),
+        model_step=1,
+    )
+    compiler, compiled = _command_result(
+        ("g++", "main.cpp", "-o", "main"),
+        ok=True,
+        purpose="verification",
+    )
+    executable, executed = _command_result(
+        ("./main",),
+        ok=True,
+        call_id="call-executable",
+        purpose="verification",
+    )
+
+    policy.observe_tool(compiler, compiled, model_step=2)
+    policy.observe_tool(executable, executed, model_step=3)
+
+    assert policy.evaluate().reason is CompletionReason.VERIFIED
 
 
 def test_policy_reset_clears_evidence_for_a_new_task() -> None:

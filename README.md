@@ -48,3 +48,39 @@ tool argument/output bodies, final response bodies, and model reasoning content.
 
 Each new interactive user turn receives a fresh model-step allowance while prior
 messages and completion evidence remain available to the session.
+
+## Verification before completion
+
+After a successful `create_file` or `replace_text`, MiniCoder accepts the final
+response only after a relevant command succeeds. Built-in recognition covers
+common Python checks, npm/pnpm/yarn scripts, Go, Cargo, .NET, Maven, Gradle,
+Make, C and C++ compilers, CMake builds, CTest, and Ninja. For example, one
+recognition rule covers any `g++` compilation containing a C or C++ source file;
+individual source filenames do not need to be registered.
+
+The model marks commands intended as evidence with
+`purpose="verification"`. That declaration makes the intent explicit but does
+not turn an arbitrary successful command such as `echo done` into proof. If a
+toolchain is not built in, configure one stable whole-project verifier rather
+than one command per source file:
+
+```toml
+# .minicoder.toml
+[verification]
+commands = [
+  ["zig", "build", "test"],
+  ["python", "scripts/verify_project.py"],
+]
+```
+
+Each entry is an exact argv alternative, not shell text: pipes, redirection,
+globs, and `&&` are not expanded. MiniCoder reads and validates this file once
+at startup, then keeps an immutable snapshot for the session. This prevents an
+in-session file edit from authorizing a new verifier. Review configuration
+changes and restart MiniCoder to load them. `--check-config` reports only the
+number of configured commands, not their contents.
+
+When a command explicitly marked for verification succeeds but is neither
+built in nor present in the startup snapshot, the task ends once with
+`verification_unsupported` and configuration guidance. It does not repeatedly
+reject the same final answer until the model-step limit is exhausted.

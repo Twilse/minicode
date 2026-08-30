@@ -3,32 +3,18 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol
 
+from minicoder.application.verification import (
+    CommandVerificationClassifier,
+    VerificationClassifier,
+)
 from minicoder.domain.models import ToolCall, ToolResult
 
 _MUTATION_TOOLS = frozenset({"create_file", "replace_text"})
-_EXECUTABLE_SUFFIXES = (".exe", ".com", ".bat", ".cmd")
-_PYTHON_PROGRAM = re.compile(r"python(?:3(?:\.\d+)?)?", re.IGNORECASE)
-_DIRECT_VERIFIERS = frozenset(
-    {
-        "flake8",
-        "mypy",
-        "nox",
-        "pytest",
-        "pyright",
-        "tox",
-    }
-)
-_PYTHON_MODULE_VERIFIERS = frozenset(
-    {"compileall", "mypy", "py_compile", "pytest", "unittest"}
-)
-_MAKE_TARGETS = frozenset({"build", "check", "lint", "test", "verify"})
-_PACKAGE_SCRIPT_TARGETS = frozenset({"build", "check", "lint", "test", "verify"})
 
 
 class CompletionReason(str, Enum):
@@ -38,6 +24,7 @@ class CompletionReason(str, Enum):
     VERIFIED = "verified"
     VERIFICATION_REQUIRED = "verification_required"
     VERIFICATION_FAILED = "verification_failed"
+    VERIFICATION_UNSUPPORTED = "verification_unsupported"
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +34,7 @@ class CompletionDecision:
     accepted: bool  # Whether AgentEngine may finish with the proposed response.
     reason: CompletionReason  # Stable decision reason for events and tests.
     feedback: str | None = None  # Host instruction appended after a rejection.
+    terminal: bool = False  # Whether retrying inside this session cannot resolve it.
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,7 +85,16 @@ class CompletionPolicy(Protocol):
 class EvidenceBasedCompletionPolicy:
     """Require a successful recognized check after the latest file mutation."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        verification: VerificationClassifier | None = None,
+    ) -> None:
+        self._verification = (
+            CommandVerificationClassifier()
+            if verification is None
+            else verification
+        )
         self.reset()
 
     @property
@@ -119,6 +116,7 @@ class EvidenceBasedCompletionPolicy:
         self._last_successful_verification_step: int | None = None
         self._last_verification_generation: int | None = None
         self._last_verification_passed: bool | None = None
+        self._unsupported_verification_generation: int | None = None
 
     def observe_tool(
         self,
@@ -133,9 +131,23 @@ class EvidenceBasedCompletionPolicy:
                 self._modified_files[path] = None
             self._mutation_generation += 1
             self._last_mutation_step = model_step
+            self._unsupported_verification_generation = None
 
-        verification_kind = _verification_kind(result)
-        if verification_kind is None:
+        classification = self._verification.classify(result)
+        if classification is None:
+            return None
+        if classification.kind is None:
+            if (
+                classification.attempted
+                and result.ok
+                and result.metadata.get("exit_code") == 0
+                and result.metadata.get("timed_out") is False
+                and self._last_verification_generation
+                != self._mutation_generation
+            ):
+                self._unsupported_verification_generation = (
+                    self._mutation_generation
+                )
             return None
 
         passed = (
@@ -145,10 +157,11 @@ class EvidenceBasedCompletionPolicy:
         )
         self._last_verification_generation = self._mutation_generation
         self._last_verification_passed = passed
+        self._unsupported_verification_generation = None
         if passed:
             self._last_successful_verification_step = model_step
         return VerificationObservation(
-            kind=verification_kind,
+            kind=classification.kind,
             passed=passed,
             model_step=model_step,
         )
@@ -186,6 +199,22 @@ class EvidenceBasedCompletionPolicy:
                 ),
             )
 
+        if (
+            self._unsupported_verification_generation
+            == self._mutation_generation
+        ):
+            return CompletionDecision(
+                accepted=False,
+                reason=CompletionReason.VERIFICATION_UNSUPPORTED,
+                feedback=(
+                    "A command marked for verification completed, but MiniCoder "
+                    "does not recognize it as built-in or startup-configured "
+                    "verification. Add its exact argv to [verification].commands "
+                    "in .minicoder.toml, review that file, and start a new session."
+                ),
+                terminal=True,
+            )
+
         return CompletionDecision(
             accepted=False,
             reason=CompletionReason.VERIFICATION_REQUIRED,
@@ -193,8 +222,9 @@ class EvidenceBasedCompletionPolicy:
                 "[MiniCoder completion policy]\n"
                 "Files were changed but have not been successfully verified after "
                 f"the latest change{files}. Run a relevant test, compile, or "
-                "static-check command with run_command before returning a final "
-                "response."
+                "static-check command with run_command and set purpose to "
+                "'verification' before returning a final response."
+                f"{self._configured_command_guidance()}"
             ),
         )
 
@@ -205,90 +235,19 @@ class EvidenceBasedCompletionPolicy:
         files = _display_files(self.modified_files)
         if decision.reason is CompletionReason.VERIFICATION_FAILED:
             return f"Latest verification failed after the most recent change{files}."
+        if decision.reason is CompletionReason.VERIFICATION_UNSUPPORTED:
+            return "The attempted verification method is not supported in this session."
         return f"Modified work was not verified after the latest change{files}."
 
-
-def _verification_kind(result: ToolResult) -> str | None:
-    if result.tool_name != "run_command":
-        return None
-    argv = result.metadata.get("argv")
-    if (
-        not isinstance(argv, Sequence)
-        or isinstance(argv, (str, bytes))
-        or not argv
-        or any(not isinstance(argument, str) for argument in argv)
-    ):
-        return None
-
-    normalized = tuple(argument.casefold() for argument in argv)
-    program = _program_name(normalized[0])
-    arguments = normalized[1:]
-
-    if program in _DIRECT_VERIFIERS:
-        if not _is_informational(arguments):
-            return program
-    if _PYTHON_PROGRAM.fullmatch(program) and len(arguments) >= 2:
-        if (
-            arguments[0] == "-m"
-            and arguments[1] in _PYTHON_MODULE_VERIFIERS
-            and not _is_informational(arguments[2:])
-        ):
-            return arguments[1]
-    if program == "ruff" and arguments:
-        if arguments[0] == "check" or (
-            arguments[0] == "format" and "--check" in arguments[1:]
-        ):
-            return "ruff"
-    if program in {"npm", "pnpm", "yarn"}:
-        return _package_script_kind(program, arguments)
-    if program == "go" and arguments[:1] == ("test",):
-        return "go test"
-    if program == "cargo" and arguments[:1] in {("test",), ("check",)}:
-        return f"cargo {arguments[0]}"
-    if program == "dotnet" and arguments[:1] in {("test",), ("build",)}:
-        return f"dotnet {arguments[0]}"
-    if program in {"mvn", "mvnw"} and any(
-        argument in {"test", "verify"} for argument in arguments
-    ):
-        return "maven"
-    if program in {"gradle", "gradlew"} and any(
-        argument in _MAKE_TARGETS for argument in arguments
-    ):
-        return "gradle"
-    if program == "make" and any(
-        argument in _MAKE_TARGETS for argument in arguments
-    ):
-        return "make"
-    return None
-
-
-def _package_script_kind(program: str, arguments: tuple[str, ...]) -> str | None:
-    if not arguments:
-        return None
-    if arguments[0] in _PACKAGE_SCRIPT_TARGETS:
-        return f"{program} {arguments[0]}"
-    if (
-        arguments[0] == "run"
-        and len(arguments) >= 2
-        and arguments[1] in _PACKAGE_SCRIPT_TARGETS
-    ):
-        return f"{program} {arguments[1]}"
-    return None
-
-
-def _is_informational(arguments: Sequence[str]) -> bool:
-    return any(
-        argument in {"-h", "--help", "--version", "--collect-only"}
-        for argument in arguments
-    )
-
-
-def _program_name(raw_program: str) -> str:
-    name = raw_program.replace("\\", "/").rsplit("/", maxsplit=1)[-1]
-    for suffix in _EXECUTABLE_SUFFIXES:
-        if name.endswith(suffix):
-            return name[: -len(suffix)]
-    return name
+    def _configured_command_guidance(self) -> str:
+        count = self._verification.configured_command_count
+        if count == 0:
+            return ""
+        noun = "command" if count == 1 else "commands"
+        return (
+            f" This session loaded {count} exact alternative verification "
+            f"{noun} from .minicoder.toml."
+        )
 
 
 def _mutation_path(

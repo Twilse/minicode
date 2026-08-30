@@ -180,5 +180,6 @@ def _configuration_summary(context: BootstrapContext) -> str:
             f"model={config.model}",
             f"workspace={config.workspace}",
             f"operating_system={context.operating_system.value}",
+            f"verification_commands={len(context.verification_commands)}",
         )
     )

@@ -23,6 +23,8 @@ COMMAND_NOT_FOUND = "COMMAND_NOT_FOUND"
 COMMAND_PERMISSION_DENIED = "COMMAND_PERMISSION_DENIED"
 COMMAND_TIMED_OUT = "COMMAND_TIMED_OUT"
 OUTPUT_STORAGE_FAILED = "OUTPUT_STORAGE_FAILED"
+COMMAND_PURPOSE_GENERAL = "general"
+COMMAND_PURPOSE_VERIFICATION = "verification"
 
 _MAX_COMMAND_ARGUMENTS = 100
 _MAX_COMMAND_ARGUMENT_CHARS = 20_000
@@ -61,7 +63,9 @@ class RunCommandTool:
             name="run_command",
             description=(
                 "Run a non-interactive command in the workspace using an argv list. "
-                "Shell syntax such as pipes, redirects, and && is not supported."
+                "Shell syntax such as pipes, redirects, and && is not supported. "
+                "Set purpose to verification when the command is intended to test, "
+                "build, compile, or statically check changed code."
             ),
             parameters_schema={
                 "type": "object",
@@ -75,7 +79,19 @@ class RunCommandTool:
                             "minLength": 1,
                             "maxLength": _MAX_COMMAND_ARGUMENT_CHARS,
                         },
-                    }
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "enum": [
+                            COMMAND_PURPOSE_GENERAL,
+                            COMMAND_PURPOSE_VERIFICATION,
+                        ],
+                        "default": COMMAND_PURPOSE_GENERAL,
+                        "description": (
+                            "Whether this command supplies completion verification "
+                            "evidence or performs a general inspection/action."
+                        ),
+                    },
                 },
                 "required": ["argv"],
                 "additionalProperties": False,
@@ -88,6 +104,10 @@ class RunCommandTool:
 
     def execute(self, command: ToolCommand) -> ToolResult:
         raw_argv = command.arguments["argv"]
+        purpose = command.arguments.get(
+            "purpose",
+            COMMAND_PURPOSE_GENERAL,
+        )
         try:
             argv = self._policy.validate_and_normalize(raw_argv)
             process_result = self._processes.run(
@@ -134,6 +154,8 @@ class RunCommandTool:
 
         metadata: dict[str, Any] = {
             "argv": argv,
+            "requested_argv": tuple(raw_argv),
+            "purpose": purpose,
             "exit_code": process_result.exit_code,
             "timed_out": process_result.timed_out,
             "duration_seconds": process_result.duration_seconds,

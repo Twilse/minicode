@@ -28,10 +28,10 @@ from minicoder.domain.state import (
 )
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are MiniCoder, a local coding agent. Use the available tools to inspect "
-    "and modify only the configured workspace, run relevant checks, and return a "
-    "concise final response when the task is complete. After changing files, run "
-    "relevant tests, compilation, or static checks before claiming completion."
+    "You are MiniCoder, a local coding agent. Use tools only inside the configured "
+    "workspace and inspect before editing. After file changes, use run_command with "
+    "purpose='verification' for relevant tests, compilation, or static checks. "
+    "Return a concise final response only when the task is complete."
 )
 
 
@@ -248,6 +248,23 @@ class AgentEngine:
                 if feedback is None:
                     raise DomainValidationError(
                         "rejected completion decisions require feedback"
+                    )
+                if decision.terminal:
+                    state.fail()
+                    self._events.publish(
+                        AgentEventKind.TASK_FAILED,
+                        model_step=state.model_steps,
+                        details={
+                            "reason": AgentStopReason.VERIFICATION_UNSUPPORTED.value,
+                            "message": feedback,
+                        },
+                    )
+                    return AgentRunResult(
+                        phase=AgentPhase.FAILED,
+                        stop_reason=AgentStopReason.VERIFICATION_UNSUPPORTED,
+                        model_steps=state.model_steps,
+                        messages=tuple(messages),
+                        failure_message=feedback,
                     )
                 messages.append(
                     Message(

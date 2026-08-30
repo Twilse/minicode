@@ -13,6 +13,7 @@ from minicoder.adapters.subprocess_runner import (
 from minicoder.application.completion import EvidenceBasedCompletionPolicy
 from minicoder.application.context import ContextManager
 from minicoder.application.retry import ExponentialBackoffRetryStrategy
+from minicoder.application.verification import ConfiguredVerificationCommand
 from minicoder.bootstrap import ApplicationFactory
 from minicoder.config import AppConfig
 from minicoder.domain.models import AssistantTurn, ToolCall
@@ -38,6 +39,35 @@ def test_factory_creates_validated_bootstrap_context(tmp_path: Path) -> None:
 
     assert context.config.workspace == tmp_path.resolve()
     assert context.operating_system is OperatingSystem.WINDOWS
+    assert context.verification_commands == ()
+
+
+def test_factory_freezes_verification_commands_in_bootstrap_context(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / ".minicoder.toml"
+    config_path.write_text(
+        "[verification]\ncommands = [['zig', 'build', 'test']]\n",
+        encoding="utf-8",
+    )
+
+    context = ApplicationFactory.create_bootstrap_context(
+        environ={
+            "MINICODER_API_KEY": "key",
+            "MINICODER_BASE_URL": "https://models.example.com/v1",
+            "MINICODER_MODEL": "model",
+        },
+        workspace=tmp_path,
+        platform_name="darwin",
+    )
+    config_path.write_text(
+        "[verification]\ncommands = [['changed', 'later']]\n",
+        encoding="utf-8",
+    )
+
+    assert context.verification_commands == (
+        ConfiguredVerificationCommand(("zig", "build", "test")),
+    )
 
 
 def test_factory_configures_sdk_client_without_hidden_retries(

@@ -478,6 +478,73 @@ def test_engine_reports_unverified_work_when_step_limit_is_reached() -> None:
     assert "completion policy" in (result.messages[-1].content or "")
 
 
+def test_engine_stops_once_for_an_unsupported_declared_verifier() -> None:
+    mutation = ToolCall(
+        id="call-create-zig",
+        name="create_file",
+        arguments_json='{"path":"main.zig"}',
+    )
+    verification = ToolCall(
+        id="call-zig-test",
+        name="run_command",
+        arguments_json=(
+            '{"argv":["zig","build","test"],"purpose":"verification"}'
+        ),
+    )
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(content=None, tool_calls=(mutation,)),
+            AssistantTurn(content=None, tool_calls=(verification,)),
+            AssistantTurn(content="The Zig build passed."),
+        ]
+    )
+    tools = FakeToolAdapter(
+        [
+            ToolResult(
+                call_id=mutation.id,
+                tool_name=mutation.name,
+                ok=True,
+                content="created main.zig",
+                metadata={"path": "main.zig"},
+            ),
+            ToolResult(
+                call_id=verification.id,
+                tool_name=verification.name,
+                ok=True,
+                content="build passed",
+                metadata={
+                    "argv": ("zig", "build", "test"),
+                    "requested_argv": ("zig", "build", "test"),
+                    "purpose": "verification",
+                    "exit_code": 0,
+                    "timed_out": False,
+                },
+            ),
+        ],
+        definitions=(_definition("create_file"), _definition("run_command")),
+    )
+    events = MemoryEventSink()
+    engine = AgentEngine(
+        model=model,
+        tools=tools,
+        max_steps=20,
+        events=EventBus((events,), run_id="run-unsupported-verifier"),
+    )
+
+    result = engine.run("Create and verify a Zig program")
+
+    assert result.phase is AgentPhase.FAILED
+    assert result.stop_reason is AgentStopReason.VERIFICATION_UNSUPPORTED
+    assert result.model_steps == 3
+    assert ".minicoder.toml" in (result.failure_message or "")
+    assert result.messages[-1].role is MessageRole.ASSISTANT
+    assert AgentEventKind.COMPLETION_REJECTED not in {
+        event.kind for event in events.events
+    }
+    assert events.events[-1].kind is AgentEventKind.TASK_FAILED
+    assert events.events[-1].details["reason"] == "verification_unsupported"
+
+
 def test_engine_requires_repair_after_failed_verification() -> None:
     first_change = ToolCall(
         id="call-first-change",

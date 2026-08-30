@@ -27,6 +27,7 @@ class AgentStopReason(str, Enum):
     MAX_STEPS = "max_steps"
     MODEL_ERROR = "model_error"
     USER_INTERRUPTED = "user_interrupted"
+    VERIFICATION_UNSUPPORTED = "verification_unsupported"
 
 
 @dataclass(frozen=True, slots=True)
