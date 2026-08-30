@@ -10,6 +10,10 @@ from typing import Mapping, TextIO
 
 from minicoder.adapters.console import ConsoleEventSink
 from minicoder.adapters.jsonl_trace import JsonlTraceSink
+from minicoder.adapters.terminal_ui import (
+    InteractiveLineReader,
+    MarkdownTerminalRenderer,
+)
 from minicoder.application.ports import EventSinkPort
 from minicoder.bootstrap import AgentSession, ApplicationFactory, BootstrapContext
 from minicoder.domain.errors import MiniCoderError
@@ -59,6 +63,12 @@ def main(
     input_stream = sys.stdin if stdin is None else stdin
     output = sys.stdout if stdout is None else stdout
     error_output = sys.stderr if stderr is None else stderr
+    line_reader = InteractiveLineReader(
+        input_stream,
+        output,
+        use_line_editor=stdin is None and stdout is None,
+    )
+    renderer = MarkdownTerminalRenderer(output)
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -91,7 +101,8 @@ def main(
         if args.task is None:
             return _run_interactive(
                 session,
-                input_stream=input_stream,
+                line_reader=line_reader,
+                renderer=renderer,
                 output=output,
                 error_output=error_output,
             )
@@ -106,7 +117,7 @@ def main(
     _print_event_failures(session, error_output=error_output)
 
     if result.phase is AgentPhase.COMPLETE:
-        print(result.final_response, file=output)
+        renderer.render(result.final_response or "")
         return 0
     print(f"agent failed: {result.failure_message}", file=error_output)
     return 1
@@ -115,20 +126,20 @@ def main(
 def _run_interactive(
     session: AgentSession,
     *,
-    input_stream: TextIO,
+    line_reader: InteractiveLineReader,
+    renderer: MarkdownTerminalRenderer,
     output: TextIO,
     error_output: TextIO,
 ) -> int:
     """Read user turns until EOF or an explicit exit command."""
 
-    print("MiniCoder interactive session. Type /exit to quit.", file=output)
+    print("MiniCoder 交互模式。输入 /exit 或 /quit 退出。", file=output)
     reported_failure_count = 0
     last_exit_code = 0
     with session:
         while True:
-            print("minicoder> ", end="", file=output, flush=True)
-            line = input_stream.readline()
-            if line == "":
+            line = line_reader.read("minicoder> ")
+            if line is None:
                 print(file=output)
                 return last_exit_code
 
@@ -145,7 +156,7 @@ def _run_interactive(
                 start=reported_failure_count,
             )
             if result.phase is AgentPhase.COMPLETE:
-                print(result.final_response, file=output)
+                renderer.render(result.final_response or "")
                 last_exit_code = 0
             else:
                 print(

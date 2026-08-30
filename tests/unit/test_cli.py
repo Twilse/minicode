@@ -132,9 +132,9 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
 
     assert exit_code == 0
     assert stdout.getvalue().splitlines() == [
-        "[TASK] started (7 tools, max 20 model steps)",
-        "[MODEL] step 1 requested (2 messages)",
-        "[DONE] completed after 1 model steps",
+        "[开始] 正在处理你的任务（本轮最多 20 个步骤）",
+        "[分析] 正在规划下一步（步骤 1）",
+        "[完成] 任务已完成（共 1 个步骤）",
         "Task completed safely.",
     ]
     assert stderr.getvalue() == ""
@@ -184,10 +184,10 @@ def test_cli_without_a_task_runs_an_interactive_multi_turn_session(
     )
 
     assert exit_code == 0
-    assert "MiniCoder interactive session" in stdout.getvalue()
+    assert "MiniCoder 交互模式" in stdout.getvalue()
     assert "The project uses Python." in stdout.getvalue()
     assert "It requires Python 3.11." in stdout.getvalue()
-    assert stdout.getvalue().count("[TASK] started") == 2
+    assert stdout.getvalue().count("[开始]") == 2
     assert stderr.getvalue() == ""
     second_request = model.requests[1].messages
     assert [message.role for message in second_request] == [
@@ -312,5 +312,48 @@ def test_cli_returns_one_for_a_model_failure(
     )
 
     assert exit_code == 1
-    assert "[FAILED] model_error" in stdout.getvalue()
+    assert "[失败] 模型服务请求失败" in stdout.getvalue()
     assert "agent failed: Model request failed" in stderr.getvalue()
+
+
+def test_cli_renders_model_markdown_instead_of_printing_fence_markers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(
+                content=(
+                    "输入格式：\n\n"
+                    "```text\n"
+                    "n m\n"
+                    "u v w   # 共 m 行\n"
+                    "source\n"
+                    "```"
+                )
+            )
+        ]
+    )
+    monkeypatch.setattr(
+        ApplicationFactory,
+        "create_model_adapter",
+        lambda config: model,
+    )
+    stdout = StringIO()
+
+    exit_code = main(
+        ["--workspace", str(tmp_path), "Explain the input format"],
+        environ={
+            "MINICODER_API_KEY": "not-used",
+            "MINICODER_BASE_URL": "https://models.example.com/v1",
+            "MINICODER_MODEL": "not-used",
+        },
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    rendered = stdout.getvalue()
+    assert exit_code == 0
+    assert "```" not in rendered
+    assert "n m" in rendered
+    assert "u v w   # 共 m 行" in rendered

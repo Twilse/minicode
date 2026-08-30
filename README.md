@@ -49,6 +49,23 @@ tool argument/output bodies, final response bodies, and model reasoning content.
 Each new interactive user turn receives a fresh model-step allowance while prior
 messages and completion evidence remain available to the session.
 
+## Terminal experience
+
+On a real terminal, interactive input uses Python's editable `input()` path and
+loads `readline` where the platform provides it. This gives committed Unicode
+text character-aware Backspace handling and normal line history instead of
+editing raw UTF-8 bytes. Injected streams keep a deterministic plain line reader
+for tests and redirected input.
+
+The default console shows user-facing Chinese progress such as “正在读取文件” and
+“C/C++ 编译检查已通过”. Successful tool-completion noise, internal tool names,
+call IDs, message counts, and provider error classes are omitted. The optional
+JSONL trace retains the sanitized technical event fields for diagnosis.
+
+Final model responses are rendered as Markdown with Rich, including headings,
+lists, inline emphasis, and syntax-highlighted fenced code blocks. Valid fence
+markers such as three backticks are interpreted rather than printed literally.
+
 ## Verification before completion
 
 After a successful `create_file` or `replace_text`, MiniCoder accepts the final

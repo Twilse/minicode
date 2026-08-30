@@ -93,16 +93,40 @@ def test_console_sink_renders_concise_event_lines() -> None:
     )
 
     assert output.getvalue().splitlines() == [
-        "[TASK] started (7 tools, max 20 model steps)",
-        "[MODEL] step 1 requested (2 messages)",
-        "[MODEL] retry 1 after ModelConnectionError (0.5s)",
-        "[CONTEXT] compacted 2000 -> 800 chars (4 messages omitted)",
-        "[REVIEW] final response rejected (verification_required; 2 modified files)",
-        "[TOOL] read_file called (call_id=call-1)",
-        "[TOOL] read_file failed (FILE_NOT_FOUND) (call_id=call-1)",
-        "[VERIFY] pytest passed",
-        "[FAILED] model_error after 1 model steps: network unavailable",
+        "[开始] 正在处理你的任务（本轮最多 20 个步骤）",
+        "[分析] 正在规划下一步（步骤 1）",
+        "[重试] 模型服务暂时不可用，0.5 秒后进行第 1 次重试",
+        "[上下文] 对话较长，已整理早期内容",
+        "[检查] 文件已经修改，正在补充验证…",
+        "[操作] 正在读取文件…",
+        "[注意] 读取文件未成功；结果已返回给 MiniCoder",
+        "[验证] pytest 测试已通过",
+        "[失败] 模型服务请求失败",
     ]
+
+
+def test_console_sink_omits_success_noise_and_internal_call_ids() -> None:
+    output = StringIO()
+    bus = EventBus((ConsoleEventSink(output),), run_id="run-friendly")
+
+    bus.publish(
+        AgentEventKind.TOOL_CALLED,
+        model_step=1,
+        details={"tool_name": "create_file", "call_id": "private-call-id"},
+    )
+    bus.publish(
+        AgentEventKind.TOOL_FINISHED,
+        model_step=1,
+        details={
+            "tool_name": "create_file",
+            "call_id": "private-call-id",
+            "ok": True,
+            "error_code": None,
+        },
+    )
+
+    assert output.getvalue().splitlines() == ["[操作] 正在创建文件…"]
+    assert "private-call-id" not in output.getvalue()
 
 
 def test_jsonl_sink_appends_parseable_versioned_records(tmp_path: Path) -> None:
