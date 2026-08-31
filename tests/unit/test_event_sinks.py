@@ -181,6 +181,29 @@ def test_console_sink_shows_command_and_chinese_failure_reason() -> None:
     ]
 
 
+def test_console_sink_explains_an_out_of_order_tool_without_claiming_execution() -> None:
+    output = StringIO()
+    bus = EventBus((ConsoleEventSink(output),), run_id="run-plan-order")
+
+    bus.publish(
+        AgentEventKind.PLAN_TOOL_REJECTED,
+        model_step=3,
+        details={
+            "call_id": "call-too-early",
+            "tool_name": "replace_text",
+            "expected_plan_step": 2,
+            "attempted_plan_step": 4,
+            "plan_item_count": 6,
+            "display_path": "README.md",
+        },
+    )
+
+    assert output.getvalue().splitlines() == [
+        "[顺序] 暂未执行 replace_text：当前应先处理计划 2/6，该操作更符合 4/6"
+    ]
+    assert "call-too-early" not in output.getvalue()
+
+
 def test_console_sink_renders_planning_and_memory_as_optional_progress() -> None:
     output = StringIO()
     bus = EventBus((ConsoleEventSink(output),), run_id="run-plan-memory")

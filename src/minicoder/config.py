@@ -23,7 +23,7 @@ class AppConfig:
     base_url: str
     model: str
     workspace: Path
-    max_steps: int  # Maximum agent iterations before forced termination.
+    max_steps: int  # Maximum model requests in one user turn.
     model_timeout_seconds: float  # Timeout for one model API request in seconds.
     command_timeout_seconds: float  # Per-command execution timeout in seconds.
     max_tool_output_chars: int  # Maximum characters returned by one tool call.
@@ -83,7 +83,7 @@ class AppConfig:
             base_url=base_url,
             model=model,
             workspace=workspace_path,
-            max_steps=_positive_int(source, "MINICODER_MAX_STEPS", 20),
+            max_steps=_positive_int(source, "MINICODER_MAX_STEPS", 40),
             model_timeout_seconds=_positive_float(
                 source,
                 "MINICODER_MODEL_TIMEOUT_SECONDS",

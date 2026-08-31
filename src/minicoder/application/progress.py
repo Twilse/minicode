@@ -54,6 +54,7 @@ _MUTATION_KEYWORDS = (
     "fix",
     "add",
     "change",
+    "extend",
     "refactor",
     "实现",
     "修改",
@@ -65,6 +66,7 @@ _MUTATION_KEYWORDS = (
     "增加",
     "接入",
     "补充",
+    "扩展",
     "重构",
 )
 _TEST_AUTHORING_KEYWORDS = (
@@ -171,6 +173,9 @@ class PlanTransition:
 
     updates: tuple[PlanStepUpdate, ...] = ()  # Honest start/complete changes.
     untracked: tuple[PlanStep, ...] = ()  # Items lacking an individual activity.
+    blocked: bool = False  # Whether this tool would violate strict plan order.
+    expected: PlanStep | None = None  # Item that must receive activity first.
+    attempted: PlanStep | None = None  # Later item the tool appears to target.
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,7 +257,7 @@ class PlanProgress:
         activity = _activity_for_tool(call)
         inferred = _matching_step(
             self.items,
-            activity.keywords,
+            activity,
             start=max(self.current_index, 1),
         )
         target = inferred if inferred is not None else max(self.current_index, 1)
@@ -274,6 +279,18 @@ class PlanProgress:
         if target == self.current_index:
             self._current_has_activity = True
             return PlanTransition()
+        if not self._current_has_activity:
+            return PlanTransition(
+                blocked=True,
+                expected=self._step(self.current_index),
+                attempted=self._step(target),
+            )
+        if target > self.current_index + 1:
+            return PlanTransition(
+                blocked=True,
+                expected=self._step(self.current_index + 1),
+                attempted=self._step(target),
+            )
         return self._transition_to(target)
 
     def finish(self) -> PlanTransition:
@@ -416,17 +433,16 @@ def _clean_plan_item(text: str) -> str:
 
 def _matching_step(
     items: tuple[str, ...],
-    keywords: tuple[str, ...],
+    activity: _ToolActivity,
     *,
     start: int,
 ) -> int | None:
-    if not keywords:
+    if not activity.keywords:
         return None
     best_index: int | None = None
     best_score = 0
     for index in range(start, len(items) + 1):
-        folded = items[index - 1].casefold()
-        score = sum(keyword in folded for keyword in keywords)
+        score = _activity_score(items[index - 1], activity)
         if score > best_score:
             best_index = index
             best_score = score
@@ -434,8 +450,34 @@ def _matching_step(
 
 
 def _step_matches_action(item: str, keywords: tuple[str, ...]) -> bool:
-    folded = item.casefold()
-    return any(keyword in folded for keyword in keywords)
+    return any(_contains_keyword(item, keyword) for keyword in keywords)
+
+
+def _activity_score(item: str, activity: _ToolActivity) -> int:
+    action_hits = sum(
+        _contains_keyword(item, keyword)
+        for keyword in activity.action_keywords
+    )
+    if activity.action_keywords and action_hits == 0:
+        return 0
+    target_hits = sum(
+        _contains_keyword(item, keyword)
+        for keyword in activity.target_keywords
+    )
+    if action_hits:
+        return 10 + target_hits * 10
+    return target_hits
+
+
+def _contains_keyword(text: str, keyword: str) -> bool:
+    folded_text = text.casefold()
+    folded_keyword = keyword.casefold()
+    if not folded_keyword.isascii():
+        return folded_keyword in folded_text
+    tokens = re.findall(r"[a-z0-9_+.-]+", folded_text)
+    if folded_keyword == "analy":
+        return any(token.startswith("analy") for token in tokens)
+    return folded_keyword in tokens
 
 
 def _activity_for_tool(call: ToolCall) -> _ToolActivity:
@@ -465,18 +507,19 @@ def _activity_for_tool(call: ToolCall) -> _ToolActivity:
         if program.endswith(suffix):
             program = program[: -len(suffix)]
             break
-    if program in _INSPECTION_COMMANDS:
-        return _ToolActivity(_INSPECTION_KEYWORDS)
-    if program in _VERIFICATION_COMMANDS:
-        return _ToolActivity(_VERIFICATION_KEYWORDS)
     words = {
         word
         for argument in argv
         for word in re.split(r"[^a-z0-9_+.-]+", argument.casefold())
         if word
     }
+    command_targets = tuple(sorted(words))
+    if program in _INSPECTION_COMMANDS:
+        return _ToolActivity(_INSPECTION_KEYWORDS, command_targets)
+    if program in _VERIFICATION_COMMANDS:
+        return _ToolActivity(_VERIFICATION_KEYWORDS, command_targets)
     if words & _VERIFICATION_COMMAND_WORDS:
-        return _ToolActivity(_VERIFICATION_KEYWORDS)
+        return _ToolActivity(_VERIFICATION_KEYWORDS, command_targets)
     return _ToolActivity(())
 
 

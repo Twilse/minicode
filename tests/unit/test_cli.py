@@ -141,7 +141,7 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
 
     assert exit_code == 0
     assert stdout.getvalue().splitlines() == [
-        "[开始] 正在处理你的任务（本轮最多 20 次模型调用）",
+        "[开始] 正在处理你的任务（本轮最多 40 次模型调用）",
         "[计划] 正在制定本轮执行计划…",
         "[计划] 已生成，共 2 项：",
         "  1. Inspect the project.",

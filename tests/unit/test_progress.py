@@ -71,6 +71,10 @@ def test_compatible_explicit_plan_step_takes_priority_over_inference() -> None:
         "1. Inspect files.\n2. Implement changes.\n3. Verify behavior."
     )
     progress.begin()
+    progress.advance_for_tool(
+        _call("read_file", {"path": "app.py"}),
+        explicit_step=1,
+    )
 
     transition = progress.advance_for_tool(
         _call("replace_text", {"path": "app.py"}),
@@ -97,7 +101,26 @@ def test_incompatible_explicit_step_cannot_override_real_tool_activity() -> None
     assert progress.current_index == 1
 
 
-def test_plan_progress_reports_untracked_items_instead_of_fake_updates() -> None:
+def test_read_action_does_not_mistake_readme_for_the_english_word_read() -> None:
+    progress = PlanProgress.from_model_text(
+        "1. 检查项目结构和现有文件。\n"
+        "2. 扩展数据模型。\n"
+        "3. 扩展 CLI。\n"
+        "4. 更新 README 文档。"
+    )
+    progress.begin()
+
+    transition = progress.advance_for_tool(
+        _call("read_file", {"path": "README.md"}),
+        explicit_step=4,
+    )
+
+    assert transition.blocked is False
+    assert transition.updates == ()
+    assert progress.current_index == 1
+
+
+def test_plan_progress_blocks_a_tool_that_skips_required_items() -> None:
     progress = PlanProgress.from_model_text(
         "1. Inspect.\n2. Design.\n3. Implement.\n4. Verify."
     )
@@ -112,15 +135,15 @@ def test_plan_progress_reports_untracked_items_instead_of_fake_updates() -> None
         explicit_step=4,
     )
 
-    assert [
-        (update.step.index, update.completed)
-        for update in transition.updates
-    ] == [
-        (1, True),
-        (4, False),
-    ]
-    assert [step.index for step in transition.untracked] == [2, 3]
-    assert progress.untracked_count == 2
+    assert transition.blocked is True
+    assert transition.expected is not None
+    assert transition.expected.index == 2
+    assert transition.attempted is not None
+    assert transition.attempted.index == 4
+    assert transition.updates == ()
+    assert transition.untracked == ()
+    assert progress.current_index == 1
+    assert progress.untracked_count == 0
 
 
 def test_plan_finish_closes_only_the_active_item_before_whole_plan_completion() -> None:
@@ -142,20 +165,20 @@ def test_plan_finish_closes_only_the_active_item_before_whole_plan_completion() 
 
 def test_realistic_tool_targets_follow_each_six_step_plan_item() -> None:
     progress = PlanProgress.from_model_text(
-        "1. 检查 models.py、storage.py、cli.py、tests 和 README。\n"
-        "2. 在 models.py 和 storage.py 增加数据与存储功能。\n"
-        "3. 在 cli.py 接入新命令。\n"
-        "4. 为新功能补充 tests 测试。\n"
-        "5. 更新 README 文档。\n"
-        "6. 运行 unittest 验证。"
+        "1. 检查现有 todo_cli 的 models.py、storage.py、cli.py、测试与项目结构。\n"
+        "2. 扩展 models.py 和 storage.py：增加标签、搜索、筛选与批量清理。\n"
+        "3. 扩展 cli.py：新增筛选、批量命令和彩色输出。\n"
+        "4. 增加 pyproject.toml 打包配置，并更新 README 文档。\n"
+        "5. 新增或更新 tests 单元测试与 CLI 集成测试。\n"
+        "6. 运行 python -m unittest discover 和冒烟测试。"
     )
     progress.begin()
     calls = (
         _call("read_file", {"path": "todo_cli/models.py"}),
         _call("replace_text", {"path": "todo_cli/models.py"}),
         _call("replace_text", {"path": "todo_cli/cli.py"}),
-        _call("replace_text", {"path": "tests/test_todo_cli.py"}),
         _call("create_file", {"path": "README.md"}),
+        _call("replace_text", {"path": "tests/test_todo_cli.py"}),
         _call(
             "run_command",
             {"argv": ["python", "-m", "unittest", "discover"]},

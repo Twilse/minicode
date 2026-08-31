@@ -27,7 +27,7 @@ from minicoder.application.retry import (
 from minicoder.domain.errors import DomainValidationError, ModelError
 from minicoder.domain.events import AgentEventKind
 from minicoder.domain.memory import ProjectMemoryRecord
-from minicoder.domain.models import Message, MessageRole
+from minicoder.domain.models import Message, MessageRole, ToolCall, ToolResult
 from minicoder.domain.state import (
     AgentPhase,
     AgentRunResult,
@@ -50,8 +50,10 @@ _PLANNING_REQUIREMENT = (
     "tools, 2 to 3 steps for read-only inspection, and 3 to 7 steps for code changes. "
     "Describe actions, not an outline of the final answer. Base the plan on available "
     "conversation and project memory. Include inspection before editing and relevant "
-    "verification after changes. Do not execute the task, call tools, include answer "
-    "facts, or claim completion in this response."
+    "verification after changes. Every item in a tool-using plan must correspond to "
+    "observable tool work; do not add hidden thinking-only or design-only items. Do "
+    "not execute the task, call tools, include answer facts, or claim completion in "
+    "this response."
 )
 _EXECUTION_REQUIREMENT = (
     "[Host execution requirement]\n"
@@ -60,7 +62,10 @@ _EXECUTION_REQUIREMENT = (
     "invalidate a step, adapt the remaining steps while preserving the current user "
     "goal. When calling tools, put [plan_step=N] in the assistant content to identify "
     "the current numbered item. This is a host annotation: use it only in a response "
-    "that calls tools, never in the final answer. Do not skip required verification."
+    "that calls tools, never in the final answer. Complete each numbered item before "
+    "calling tools for the next item; the host rejects out-of-order tool calls. Group "
+    "multiple safe exact edits to one file in replace_text.replacements to reduce "
+    "model round trips. Do not skip required verification."
 )
 
 
@@ -340,6 +345,14 @@ class AgentEngine:
                             call,
                             explicit_step=annotated_plan_step,
                         )
+                        if plan_transition.blocked:
+                            result = self._reject_out_of_order_tool(
+                                call,
+                                plan_transition,
+                                model_step=state.model_steps,
+                            )
+                            messages.append(result.as_message())
+                            continue
                         self._record_plan_transition(
                             plan_transition,
                             model_step=state.model_steps,
@@ -566,6 +579,49 @@ class AgentEngine:
             )
         for update in started:
             self._record_plan_update(update, model_step=model_step)
+
+    def _reject_out_of_order_tool(
+        self,
+        call: ToolCall,
+        transition: PlanTransition,
+        *,
+        model_step: int,
+    ) -> ToolResult:
+        expected = transition.expected
+        attempted = transition.attempted
+        if expected is None or attempted is None:
+            raise DomainValidationError(
+                "blocked plan transitions require expected and attempted items"
+            )
+        details = {
+            "call_id": call.id,
+            "tool_name": call.name,
+            "expected_plan_step": expected.index,
+            "attempted_plan_step": attempted.index,
+            "plan_item_count": expected.total,
+            **tool_display_details(call),
+        }
+        self._events.publish(
+            AgentEventKind.PLAN_TOOL_REJECTED,
+            model_step=model_step,
+            details=details,
+        )
+        return ToolResult(
+            call_id=call.id,
+            tool_name=call.name,
+            ok=False,
+            error_code="PLAN_STEP_OUT_OF_ORDER",
+            content=(
+                "PLAN_STEP_OUT_OF_ORDER: this tool call appears to belong to "
+                f"plan step {attempted.index}, but plan step {expected.index} "
+                "must receive its required tool-visible work first. Follow the "
+                "numbered plan in order, then retry this operation."
+            ),
+            metadata={
+                "expected_plan_step": expected.index,
+                "attempted_plan_step": attempted.index,
+            },
+        )
 
 
 def _user_message_with_memory(

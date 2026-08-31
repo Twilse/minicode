@@ -23,6 +23,7 @@ class AgentEventKind(str, Enum):
     PLAN_STEP_STARTED = "plan_step_started"
     PLAN_STEP_COMPLETED = "plan_step_completed"
     PLAN_STEPS_UNTRACKED = "plan_steps_untracked"
+    PLAN_TOOL_REJECTED = "plan_tool_rejected"
     PLAN_COMPLETED = "plan_completed"
     MODEL_REQUESTED = "model_requested"
     MODEL_RETRY_SCHEDULED = "model_retry_scheduled"

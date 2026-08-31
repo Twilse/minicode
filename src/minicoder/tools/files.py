@@ -27,6 +27,7 @@ PARENT_DIRECTORY_NOT_FOUND = "PARENT_DIRECTORY_NOT_FOUND"
 PERMISSION_DENIED = "PERMISSION_DENIED"
 TEXT_NOT_FOUND = "TEXT_NOT_FOUND"
 TEXT_NOT_UNIQUE = "TEXT_NOT_UNIQUE"
+REPLACEMENT_BATCH_TOO_LARGE = "REPLACEMENT_BATCH_TOO_LARGE"
 
 _IGNORED_DIRECTORIES = frozenset(
     {
@@ -47,6 +48,7 @@ _MAX_SEARCH_FILE_BYTES = 1_000_000  # Largest file considered by text search.
 _MAX_SEARCH_MATCHES = 100  # Maximum matches returned by one text search.
 _MAX_MUTATION_FILE_BYTES = 1_000_000  # Largest file eligible for replacement.
 _MAX_WRITE_CHARS = 200_000  # Maximum text accepted by one write argument.
+_MAX_BATCH_REPLACEMENTS = 20  # Maximum exact edits grouped into one atomic swap.
 
 
 class ListFilesTool:
@@ -436,15 +438,18 @@ class CreateFileTool:
 
 
 class ReplaceTextTool:
-    """Replace one uniquely matching literal string using an atomic file swap."""
+    """Apply one or more unique literal replacements in one atomic file swap."""
 
     def __init__(self, paths: WorkspacePathPolicy) -> None:
         self._paths = paths
         self._definition = ToolDefinition(
             name="replace_text",
             description=(
-                "Replace one exact literal string in a UTF-8 file. The operation "
-                "is rejected unless old_text occurs exactly once."
+                "Replace exact literal strings in a UTF-8 file. Use old_text and "
+                "new_text for one edit, or replacements to group up to 20 related "
+                "edits to the same file in one model round trip. Every old_text must "
+                "match exactly once; the whole batch is rejected without writing if "
+                "any edit is invalid."
             ),
             parameters_schema={
                 "type": "object",
@@ -459,8 +464,44 @@ class ReplaceTextTool:
                         "type": "string",
                         "maxLength": _MAX_WRITE_CHARS,
                     },
+                    "replacements": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": _MAX_BATCH_REPLACEMENTS,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_text": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": _MAX_WRITE_CHARS,
+                                },
+                                "new_text": {
+                                    "type": "string",
+                                    "maxLength": _MAX_WRITE_CHARS,
+                                },
+                            },
+                            "required": ["old_text", "new_text"],
+                            "additionalProperties": False,
+                        },
+                    },
                 },
-                "required": ["path", "old_text", "new_text"],
+                "required": ["path"],
+                "oneOf": [
+                    {
+                        "required": ["old_text", "new_text"],
+                        "not": {"required": ["replacements"]},
+                    },
+                    {
+                        "required": ["replacements"],
+                        "not": {
+                            "anyOf": [
+                                {"required": ["old_text"]},
+                                {"required": ["new_text"]},
+                            ]
+                        },
+                    },
+                ],
                 "additionalProperties": False,
             },
         )
@@ -471,8 +512,33 @@ class ReplaceTextTool:
 
     def execute(self, command: ToolCommand) -> ToolResult:
         raw_path = command.arguments["path"]
-        old_text = command.arguments["old_text"]
-        new_text = command.arguments["new_text"]
+        raw_replacements = command.arguments.get("replacements")
+        if raw_replacements is None:
+            replacements = (
+                (
+                    command.arguments["old_text"],
+                    command.arguments["new_text"],
+                ),
+            )
+        else:
+            replacements = tuple(
+                (item["old_text"], item["new_text"])
+                for item in raw_replacements
+            )
+        replacement_chars = sum(
+            len(old_text) + len(new_text)
+            for old_text, new_text in replacements
+        )
+        if replacement_chars > _MAX_WRITE_CHARS:
+            return _failure(
+                command,
+                REPLACEMENT_BATCH_TOO_LARGE,
+                (
+                    "Combined old_text and new_text values exceed the "
+                    f"{_MAX_WRITE_CHARS}-character batch limit; no content was "
+                    "changed."
+                ),
+            )
         try:
             path = self._paths.resolve(raw_path)
             display_path = self._paths.display(path)
@@ -502,33 +568,47 @@ class ReplaceTextTool:
                 )
 
             original = _read_utf8_text(path)
-            match_count = _count_overlapping_occurrences(original, old_text)
-            if match_count == 0:
-                return _failure(
-                    command,
-                    TEXT_NOT_FOUND,
-                    (
-                        f"old_text was not found in {display_path!r}; "
-                        "no content was changed."
-                    ),
-                )
-            if match_count > 1:
-                return _failure(
-                    command,
-                    TEXT_NOT_UNIQUE,
-                    (
-                        f"old_text matched {match_count} times in {display_path!r}; "
-                        "no content was changed."
-                    ),
-                )
-            if old_text == new_text:
+            updated = original
+            for index, (old_text, new_text) in enumerate(
+                replacements,
+                start=1,
+            ):
+                match_count = _count_overlapping_occurrences(updated, old_text)
+                label = f"Replacement {index}"
+                if match_count == 0:
+                    return _failure(
+                        command,
+                        TEXT_NOT_FOUND,
+                        (
+                            f"{label} old_text was not found in {display_path!r}; "
+                            "the batch was not written."
+                        ),
+                    )
+                if match_count > 1:
+                    return _failure(
+                        command,
+                        TEXT_NOT_UNIQUE,
+                        (
+                            f"{label} old_text matched {match_count} times in "
+                            f"{display_path!r}; the batch was not written."
+                        ),
+                    )
+                if old_text == new_text:
+                    return _failure(
+                        command,
+                        NO_CHANGES,
+                        (
+                            f"{label} old_text and new_text are identical; "
+                            "the batch was not written."
+                        ),
+                    )
+                updated = updated.replace(old_text, new_text, 1)
+            if updated == original:
                 return _failure(
                     command,
                     NO_CHANGES,
-                    "old_text and new_text are identical; no content was changed.",
+                    "The replacement batch has no net effect; no content was changed.",
                 )
-
-            updated = original.replace(old_text, new_text, 1)
             _atomic_write_text(path, updated)
         except WorkspacePathError as exc:
             return _failure(command, exc.error_code, str(exc))
@@ -549,11 +629,25 @@ class ReplaceTextTool:
 
         return _success(
             command,
-            f"Replaced one occurrence in {display_path!r}.",
+            (
+                f"Applied {len(replacements)} exact replacement"
+                f"{'s' if len(replacements) != 1 else ''} in {display_path!r}."
+                + (
+                    " Group any remaining independent edits to this file in the "
+                    "replacements array."
+                    if len(replacements) == 1
+                    else ""
+                )
+            ),
             metadata={
                 "path": display_path,
-                "old_characters": len(old_text),
-                "new_characters": len(new_text),
+                "replacement_count": len(replacements),
+                "old_characters": sum(
+                    len(old_text) for old_text, _ in replacements
+                ),
+                "new_characters": sum(
+                    len(new_text) for _, new_text in replacements
+                ),
             },
         )
 

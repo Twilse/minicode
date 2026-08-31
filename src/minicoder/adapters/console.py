@@ -123,6 +123,15 @@ def _format_event(event: AgentEvent) -> str | None:
             f"[未关联] 计划 {label}/{count} 没有对应到独立的工具操作；"
             "不推测其具体完成时间"
         )
+    if event.kind is AgentEventKind.PLAN_TOOL_REJECTED:
+        expected = int(details["expected_plan_step"])
+        attempted = int(details["attempted_plan_step"])
+        count = int(details["plan_item_count"])
+        tool_name = str(details["tool_name"])
+        return (
+            f"[顺序] 暂未执行 {tool_name}：当前应先处理计划 "
+            f"{expected}/{count}，该操作更符合 {attempted}/{count}"
+        )
     if event.kind is AgentEventKind.PLAN_COMPLETED:
         count = int(details["plan_item_count"])
         untracked = int(details.get("untracked_plan_item_count", 0))
@@ -237,7 +246,7 @@ def _completion_message(reason: str) -> str:
 
 def _failure_message(reason: str, model_step: int) -> str:
     if reason == "max_steps":
-        return f"[未完成] 已达到本轮最大处理步骤（{model_step} 步）"
+        return f"[未完成] 已达到本轮模型调用上限（共 {model_step} 次）"
     if reason == "model_error":
         return "[失败] 模型服务请求失败"
     if reason == "planning_error":
@@ -254,8 +263,8 @@ def format_agent_failure(result: AgentRunResult) -> str:
 
     if result.stop_reason is AgentStopReason.MAX_STEPS:
         return (
-            "MiniCoder 未完成任务：已达到本轮最大模型步骤数"
-            f"（{result.model_steps} 步）。可以继续发送消息，或调整 "
+            "MiniCoder 未完成任务：已达到本轮模型调用上限"
+            f"（共 {result.model_steps} 次）。可以继续发送消息，或调整 "
             "MINICODER_MAX_STEPS。"
         )
     if result.stop_reason is AgentStopReason.MODEL_ERROR:

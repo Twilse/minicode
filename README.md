@@ -51,6 +51,14 @@ final response bodies, and model reasoning content.
 Each new interactive user turn receives a fresh model-step allowance while prior
 messages and completion evidence remain available to the session.
 
+The default allowance is 40 model requests per user turn. It includes the
+planning request and every model continuation after a tool result. Override it
+for a smaller or larger task budget:
+
+```bash
+export MINICODER_MAX_STEPS=60
+```
+
 ## Context budget
 
 MiniCoder uses an approximate character budget to keep conversation history
@@ -85,16 +93,25 @@ verification can therefore advance different plan items even when the provider
 omits tool-call content.
 
 Model-supplied step numbers are treated as hints and are accepted only when their
-plan item is compatible with the actual tool action. If a reliable association
-still jumps over pending items, MiniCoder reports those items as not individually
-tracked; it never fabricates instantaneous start/completion events. The terminal
-whole-plan event includes the number of such items.
+plan item is compatible with the actual tool action. Tool-using plan items must
+run in order: if a call targets a later item before the current or next required
+item has observable work, MiniCoder does not execute it and returns a correlated
+`PLAN_STEP_OUT_OF_ORDER` result to the model. The model can then perform the
+missing item and retry. If a reliable association is unavailable at finalization,
+MiniCoder reports the item as not individually tracked; it never fabricates
+instantaneous start/completion events.
 
 Compatible models may attach `[plan_step=N]` to a tool-calling response for an
 exact association. This is reserved host metadata: the application decodes it
 immediately after the Model Port returns and removes it before conversation
 history or final user-visible text is created. When a provider omits tool-call
 content, the deterministic activity mapping remains available.
+
+`replace_text` supports either one `old_text`/`new_text` pair or an atomic
+`replacements` batch of up to 20 related exact edits to the same file. A batch is
+validated completely in memory and written once; one missing, repeated, or
+no-op match rejects the whole batch without partially changing the file. This
+reduces model round trips for files with several independent edit locations.
 
 Planning can be disabled for providers or small models that do not handle this
 two-phase interaction well:

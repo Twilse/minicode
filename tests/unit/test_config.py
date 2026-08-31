@@ -24,7 +24,7 @@ def test_from_environment_loads_required_model_settings_and_safe_defaults(
     assert config.base_url == "https://api.deepseek.com"
     assert config.model == "deepseek-v4-pro"
     assert config.workspace == tmp_path.resolve()
-    assert config.max_steps == 20
+    assert config.max_steps == 40
     assert config.model_timeout_seconds == 60.0
     assert config.command_timeout_seconds == 30.0
     assert config.context_budget_chars == 180_000

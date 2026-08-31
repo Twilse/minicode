@@ -17,6 +17,7 @@ from minicoder.tools.files import (
     NO_CHANGES,
     NOT_A_DIRECTORY,
     PARENT_DIRECTORY_NOT_FOUND,
+    REPLACEMENT_BATCH_TOO_LARGE,
     TEXT_NOT_FOUND,
     TEXT_NOT_UNIQUE,
     CreateFileTool,
@@ -347,6 +348,109 @@ def test_replace_text_changes_one_unique_match_and_preserves_file_mode(
     assert target.read_bytes() == b"value = 'new'\r\nprint(value)\r\n"
     if os.name != "nt":
         assert stat.S_IMODE(target.stat().st_mode) == 0o744
+
+
+def test_replace_text_applies_multiple_related_edits_in_one_atomic_batch(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "cli.py"
+    target.write_text(
+        "command = 'add'\npriority = 'medium'\ncolor = False\n",
+        encoding="utf-8",
+    )
+
+    result = _execute(
+        _registry(workspace),
+        "replace_text",
+        {
+            "path": "cli.py",
+            "replacements": [
+                {"old_text": "'add'", "new_text": "'edit'"},
+                {"old_text": "'medium'", "new_text": "'high'"},
+                {"old_text": "False", "new_text": "True"},
+            ],
+        },
+    )
+
+    assert result.ok is True
+    assert result.metadata["replacement_count"] == 3
+    assert target.read_text(encoding="utf-8") == (
+        "command = 'edit'\npriority = 'high'\ncolor = True\n"
+    )
+
+
+def test_replace_text_batch_failure_leaves_every_edit_unwritten(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "cli.py"
+    original = "first = 1\nsecond = 2\n"
+    target.write_text(original, encoding="utf-8")
+
+    result = _execute(
+        _registry(workspace),
+        "replace_text",
+        {
+            "path": "cli.py",
+            "replacements": [
+                {"old_text": "first = 1", "new_text": "first = 10"},
+                {"old_text": "missing = 3", "new_text": "missing = 30"},
+            ],
+        },
+    )
+
+    assert result.error_code == TEXT_NOT_FOUND
+    assert "Replacement 2" in result.content
+    assert target.read_text(encoding="utf-8") == original
+
+
+def test_replace_text_rejects_mixed_single_and_batch_arguments(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "content.txt").write_text("old", encoding="utf-8")
+
+    result = _execute(
+        _registry(workspace),
+        "replace_text",
+        {
+            "path": "content.txt",
+            "old_text": "old",
+            "new_text": "new",
+            "replacements": [{"old_text": "old", "new_text": "new"}],
+        },
+    )
+
+    assert result.error_code == INVALID_ARGUMENTS
+    assert (workspace / "content.txt").read_text(encoding="utf-8") == "old"
+
+
+def test_replace_text_rejects_a_batch_over_the_combined_character_budget(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "content.txt"
+    target.write_text("x", encoding="utf-8")
+
+    result = _execute(
+        _registry(workspace),
+        "replace_text",
+        {
+            "path": "content.txt",
+            "replacements": [
+                {"old_text": "x", "new_text": "y" * 100_001},
+                {"old_text": "y", "new_text": "z" * 100_001},
+            ],
+        },
+    )
+
+    assert result.error_code == REPLACEMENT_BATCH_TOO_LARGE
+    assert target.read_text(encoding="utf-8") == "x"
 
 
 @pytest.mark.parametrize(

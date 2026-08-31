@@ -182,6 +182,57 @@ def test_engine_rejects_a_final_response_containing_only_host_annotations() -> N
     assert "reserved host annotations" in (result.failure_message or "")
 
 
+def test_engine_returns_out_of_order_tool_calls_to_the_model_without_execution() -> None:
+    call = ToolCall(
+        id="call-too-early",
+        name="run_command",
+        arguments_json='{"argv":["python","-m","pytest"]}',
+    )
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(
+                content=(
+                    "1. Inspect files.\n"
+                    "2. Implement the change.\n"
+                    "3. Verify with pytest."
+                )
+            ),
+            AssistantTurn(
+                content="[plan_step=3]",
+                tool_calls=(call,),
+            ),
+            AssistantTurn(content="I must inspect the files first."),
+        ]
+    )
+    tools = FakeToolAdapter(definitions=(_definition("run_command"),))
+    observed = MemoryEventSink()
+    engine = AgentEngine(
+        model=model,
+        tools=tools,
+        max_steps=3,
+        planning_enabled=True,
+        events=EventBus((observed,), run_id="run-strict-plan"),
+    )
+
+    result = engine.run("Update and verify the project")
+
+    assert result.phase is AgentPhase.COMPLETE
+    assert tools.calls == []
+    feedback = model.requests[2].messages[-1]
+    assert feedback.role is MessageRole.TOOL
+    assert "PLAN_STEP_OUT_OF_ORDER" in (feedback.content or "")
+    rejection = next(
+        event
+        for event in observed.events
+        if event.kind is AgentEventKind.PLAN_TOOL_REJECTED
+    )
+    assert rejection.details["expected_plan_step"] == 1
+    assert rejection.details["attempted_plan_step"] == 3
+    assert AgentEventKind.TOOL_CALLED not in {
+        event.kind for event in observed.events
+    }
+
+
 def test_engine_counts_planning_against_the_model_step_limit() -> None:
     model = FakeModelAdapter([AssistantTurn(content="1. Inspect the project.")])
     tools = FakeToolAdapter(definitions=(_definition(),))
