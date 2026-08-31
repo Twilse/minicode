@@ -141,16 +141,17 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
 
     assert exit_code == 0
     assert stdout.getvalue().splitlines() == [
-        "[开始] 正在处理你的任务（本轮最多 20 个步骤）",
+        "[开始] 正在处理你的任务（本轮最多 20 次模型调用）",
         "[计划] 正在制定本轮执行计划…",
         "[计划] 已生成，共 2 项：",
         "  1. Inspect the project.",
         "  2. Report the result.",
         "[进行中] 1/2 Inspect the project.",
-        "[分析] 正在规划下一步（步骤 2）",
+        "[分析] 正在请求模型（第 2 次）",
         "[已完成] 1/2 Inspect the project.",
-        "[计划] 全部 2 项已完成",
-        "[完成] 任务已完成（共 2 个步骤）",
+        "[未关联] 计划 2/2 没有对应到独立的工具操作；不推测其具体完成时间",
+        "[计划] 任务已完成，计划进度结束（共 2 项，1 项未单独关联工具操作）",
+        "[完成] 任务已完成（共 2 次模型调用）",
         "Task completed safely.",
     ]
     assert stderr.getvalue() == ""
@@ -167,6 +168,7 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
         "plan_step_started",
         "model_requested",
         "plan_step_completed",
+        "plan_steps_untracked",
         "plan_completed",
         "task_completed",
     ]

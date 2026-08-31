@@ -93,7 +93,7 @@ def _format_event(event: AgentEvent) -> str | None:
     if event.kind is AgentEventKind.TASK_STARTED:
         return (
             "[开始] 正在处理你的任务"
-            f"（本轮最多 {details['max_steps']} 个步骤）"
+            f"（本轮最多 {details['max_steps']} 次模型调用）"
         )
     if event.kind is AgentEventKind.PLANNING_STARTED:
         return "[计划] 正在制定本轮执行计划…"
@@ -114,13 +114,28 @@ def _format_event(event: AgentEvent) -> str | None:
         count = int(details["plan_item_count"])
         step = str(details.get("display_plan_step", "当前步骤"))
         return f"[已完成] {index}/{count} {step}"
+    if event.kind is AgentEventKind.PLAN_STEPS_UNTRACKED:
+        first = int(details["first_plan_step"])
+        last = int(details["last_plan_step"])
+        count = int(details["plan_item_count"])
+        label = str(first) if first == last else f"{first}–{last}"
+        return (
+            f"[未关联] 计划 {label}/{count} 没有对应到独立的工具操作；"
+            "不推测其具体完成时间"
+        )
     if event.kind is AgentEventKind.PLAN_COMPLETED:
         count = int(details["plan_item_count"])
+        untracked = int(details.get("untracked_plan_item_count", 0))
+        if untracked:
+            return (
+                f"[计划] 任务已完成，计划进度结束（共 {count} 项，"
+                f"{untracked} 项未单独关联工具操作）"
+            )
         return f"[计划] 全部 {count} 项已完成"
     if event.kind is AgentEventKind.MODEL_REQUESTED:
         if details.get("request_kind") == "planning":
             return None
-        return f"[分析] 正在规划下一步（步骤 {event.model_step}）"
+        return f"[分析] 正在请求模型（第 {event.model_step} 次）"
     if event.kind is AgentEventKind.MEMORY_LOADED:
         count = int(details.get("record_count", 0))
         return f"[记忆] 已加载这个项目最近的 {count} 条记录"
@@ -154,7 +169,7 @@ def _format_event(event: AgentEvent) -> str | None:
         label = _VERIFICATION_LABELS.get(kind, kind)
         return f"[验证] {label}已通过"
     if event.kind is AgentEventKind.TASK_COMPLETED:
-        return f"[完成] 任务已完成（共 {event.model_step} 个步骤）"
+        return f"[完成] 任务已完成（共 {event.model_step} 次模型调用）"
     if event.kind is AgentEventKind.TASK_FAILED:
         return _failure_message(str(details["reason"]), event.model_step)
     return None

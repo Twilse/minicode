@@ -45,55 +45,82 @@ def test_plan_progress_parses_items_and_infers_tool_stages() -> None:
         "运行测试并验证结果",
     )
     assert first.step.index == 1 and first.completed is False
-    assert inspection == ()
-    assert [(update.step.index, update.completed) for update in mutation] == [
+    assert inspection.updates == ()
+    assert inspection.untracked == ()
+    assert [
+        (update.step.index, update.completed) for update in mutation.updates
+    ] == [
         (1, True),
         (2, False),
     ]
-    assert [(update.step.index, update.completed) for update in verification] == [
+    assert [
+        (update.step.index, update.completed)
+        for update in verification.updates
+    ] == [
         (2, True),
         (3, False),
     ]
     assert [
-        (update.step.index, update.completed) for update in progress.finish()
+        (update.step.index, update.completed)
+        for update in progress.finish().updates
     ] == [(3, True)]
 
 
-def test_explicit_plan_step_marker_takes_priority_over_tool_inference() -> None:
+def test_compatible_explicit_plan_step_takes_priority_over_inference() -> None:
     progress = PlanProgress.from_model_text(
         "1. Inspect files.\n2. Implement changes.\n3. Verify behavior."
     )
     progress.begin()
 
-    updates = progress.advance_for_tool(
+    transition = progress.advance_for_tool(
+        _call("replace_text", {"path": "app.py"}),
+        explicit_step=2,
+    )
+
+    assert transition.updates[-1].step.index == 2
+    assert transition.updates[-1].step.text == "Implement changes."
+    assert transition.updates[-1].completed is False
+
+
+def test_incompatible_explicit_step_cannot_override_real_tool_activity() -> None:
+    progress = PlanProgress.from_model_text(
+        "1. Inspect files.\n2. Implement changes.\n3. Verify behavior."
+    )
+    progress.begin()
+
+    transition = progress.advance_for_tool(
         _call("read_file", {"path": "app.py"}),
         explicit_step=2,
     )
 
-    assert updates[-1].step.index == 2
-    assert updates[-1].step.text == "Implement changes."
-    assert updates[-1].completed is False
+    assert transition.updates == ()
+    assert progress.current_index == 1
 
 
-def test_plan_progress_emits_every_intermediate_item_in_order() -> None:
+def test_plan_progress_reports_untracked_items_instead_of_fake_updates() -> None:
     progress = PlanProgress.from_model_text(
         "1. Inspect.\n2. Design.\n3. Implement.\n4. Verify."
     )
     progress.begin()
+    progress.advance_for_tool(
+        _call("read_file", {"path": "app.py"}),
+        explicit_step=1,
+    )
 
-    updates = progress.advance_for_tool(
+    transition = progress.advance_for_tool(
         _call("run_command", {"argv": ["python", "-m", "pytest"]}),
         explicit_step=4,
     )
 
-    assert [(update.step.index, update.completed) for update in updates] == [
+    assert [
+        (update.step.index, update.completed)
+        for update in transition.updates
+    ] == [
         (1, True),
-        (2, False),
-        (2, True),
-        (3, False),
-        (3, True),
         (4, False),
     ]
+    assert [step.index for step in transition.untracked] == [2, 3]
+    assert progress.untracked_count == 2
 
 
 def test_plan_finish_closes_only_the_active_item_before_whole_plan_completion() -> None:
@@ -102,12 +129,52 @@ def test_plan_finish_closes_only_the_active_item_before_whole_plan_completion() 
     )
     progress.begin()
 
-    updates = progress.finish()
+    transition = progress.finish()
 
-    assert [(update.step.index, update.completed) for update in updates] == [
-        (1, True)
-    ]
+    assert [
+        (update.step.index, update.completed)
+        for update in transition.updates
+    ] == [(1, True)]
+    assert [step.index for step in transition.untracked] == [2, 3]
     assert progress.current_index == 3
+    assert progress.untracked_count == 2
+
+
+def test_realistic_tool_targets_follow_each_six_step_plan_item() -> None:
+    progress = PlanProgress.from_model_text(
+        "1. 检查 models.py、storage.py、cli.py、tests 和 README。\n"
+        "2. 在 models.py 和 storage.py 增加数据与存储功能。\n"
+        "3. 在 cli.py 接入新命令。\n"
+        "4. 为新功能补充 tests 测试。\n"
+        "5. 更新 README 文档。\n"
+        "6. 运行 unittest 验证。"
+    )
+    progress.begin()
+    calls = (
+        _call("read_file", {"path": "todo_cli/models.py"}),
+        _call("replace_text", {"path": "todo_cli/models.py"}),
+        _call("replace_text", {"path": "todo_cli/cli.py"}),
+        _call("replace_text", {"path": "tests/test_todo_cli.py"}),
+        _call("create_file", {"path": "README.md"}),
+        _call(
+            "run_command",
+            {"argv": ["python", "-m", "unittest", "discover"]},
+        ),
+    )
+
+    transitions = [
+        progress.advance_for_tool(call, explicit_step=None) for call in calls
+    ]
+
+    started = [
+        update.step.index
+        for transition in transitions
+        for update in transition.updates
+        if not update.completed
+    ]
+    assert started == [2, 3, 4, 5, 6]
+    assert all(not transition.untracked for transition in transitions)
+    assert progress.untracked_count == 0
 
 
 def test_tool_display_details_expose_targets_without_file_bodies() -> None:

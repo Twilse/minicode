@@ -125,6 +125,7 @@ def test_engine_plans_without_tools_before_following_the_plan() -> None:
         AgentEventKind.TOOL_FINISHED,
         AgentEventKind.MODEL_REQUESTED,
         AgentEventKind.PLAN_STEP_COMPLETED,
+        AgentEventKind.PLAN_STEPS_UNTRACKED,
         AgentEventKind.PLAN_COMPLETED,
         AgentEventKind.TASK_COMPLETED,
     ]
@@ -139,6 +140,13 @@ def test_engine_plans_without_tools_before_following_the_plan() -> None:
     ] == [
         (1, AgentEventKind.PLAN_STEP_COMPLETED),
     ]
+    assert observed.events[10].details == {
+        "first_plan_step": 2,
+        "last_plan_step": 3,
+        "untracked_plan_item_count": 2,
+        "plan_item_count": 3,
+    }
+    assert observed.events[11].details["untracked_plan_item_count"] == 2
 
 
 def test_engine_removes_reserved_annotations_from_any_final_response() -> None:

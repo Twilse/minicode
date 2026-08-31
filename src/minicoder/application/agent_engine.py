@@ -15,6 +15,7 @@ from minicoder.application.model_protocol import decode_assistant_turn
 from minicoder.application.ports import ModelPort, ToolPort
 from minicoder.application.progress import (
     PlanProgress,
+    PlanTransition,
     PlanStepUpdate,
     tool_display_details,
 )
@@ -335,15 +336,14 @@ class AgentEngine:
                 state.begin_tool_execution()
                 for call in turn.tool_calls:
                     if plan_progress is not None:
-                        plan_updates = plan_progress.advance_for_tool(
+                        plan_transition = plan_progress.advance_for_tool(
                             call,
                             explicit_step=annotated_plan_step,
                         )
-                        for update in plan_updates:
-                            self._record_plan_update(
-                                update,
-                                model_step=state.model_steps,
-                            )
+                        self._record_plan_transition(
+                            plan_transition,
+                            model_step=state.model_steps,
+                        )
                     self._events.publish(
                         AgentEventKind.TOOL_CALLED,
                         model_step=state.model_steps,
@@ -430,15 +430,19 @@ class AgentEngine:
 
             state.complete()
             if plan_progress is not None:
-                for update in plan_progress.finish():
-                    self._record_plan_update(
-                        update,
-                        model_step=state.model_steps,
-                    )
+                self._record_plan_transition(
+                    plan_progress.finish(),
+                    model_step=state.model_steps,
+                )
                 self._events.publish(
                     AgentEventKind.PLAN_COMPLETED,
                     model_step=state.model_steps,
-                    details={"plan_item_count": plan_progress.total},
+                    details={
+                        "plan_item_count": plan_progress.total,
+                        "untracked_plan_item_count": (
+                            plan_progress.untracked_count
+                        ),
+                    },
                 )
             self._events.publish(
                 AgentEventKind.TASK_COMPLETED,
@@ -534,6 +538,34 @@ class AgentEngine:
                 "display_plan_step": step.text,
             },
         )
+
+    def _record_plan_transition(
+        self,
+        transition: PlanTransition,
+        *,
+        model_step: int,
+    ) -> None:
+        completed = tuple(
+            update for update in transition.updates if update.completed
+        )
+        started = tuple(
+            update for update in transition.updates if not update.completed
+        )
+        for update in completed:
+            self._record_plan_update(update, model_step=model_step)
+        if transition.untracked:
+            self._events.publish(
+                AgentEventKind.PLAN_STEPS_UNTRACKED,
+                model_step=model_step,
+                details={
+                    "first_plan_step": transition.untracked[0].index,
+                    "last_plan_step": transition.untracked[-1].index,
+                    "untracked_plan_item_count": len(transition.untracked),
+                    "plan_item_count": transition.untracked[0].total,
+                },
+            )
+        for update in started:
+            self._record_plan_update(update, model_step=model_step)
 
 
 def _user_message_with_memory(

@@ -78,19 +78,23 @@ remains in normal conversation history and its model request counts toward
 `MINICODER_MAX_STEPS`.
 
 The console prints the bounded plan items and emits ordered “started” and
-“completed” transitions while tools move through the plan. Even if a model
-directly associates a tool with a later item, MiniCoder closes and displays each
-intermediate item in sequence instead of jumping over its number. The terminal
-whole-plan event closes any remaining items without inventing individual tool
-work for them.
+“completed” transitions while tools move through the plan. Progress is associated
+with deterministic tool-activity facts: operation type, target path or query, and
+verification command. Source edits, test edits, documentation updates, and
+verification can therefore advance different plan items even when the provider
+omits tool-call content.
+
+Model-supplied step numbers are treated as hints and are accepted only when their
+plan item is compatible with the actual tool action. If a reliable association
+still jumps over pending items, MiniCoder reports those items as not individually
+tracked; it never fabricates instantaneous start/completion events. The terminal
+whole-plan event includes the number of such items.
 
 Compatible models may attach `[plan_step=N]` to a tool-calling response for an
 exact association. This is reserved host metadata: the application decodes it
 immediately after the Model Port returns and removes it before conversation
 history or final user-visible text is created. When a provider omits tool-call
-content, MiniCoder falls back to a deterministic mapping from read/search,
-create/replace, and command tools to inspection, implementation, and
-verification plan items.
+content, the deterministic activity mapping remains available.
 
 Planning can be disabled for providers or small models that do not handle this
 two-phase interaction well:

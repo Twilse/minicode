@@ -106,8 +106,8 @@ def test_console_sink_renders_concise_event_lines() -> None:
     )
 
     assert output.getvalue().splitlines() == [
-        "[开始] 正在处理你的任务（本轮最多 20 个步骤）",
-        "[分析] 正在规划下一步（步骤 1）",
+        "[开始] 正在处理你的任务（本轮最多 20 次模型调用）",
+        "[分析] 正在请求模型（第 1 次）",
         "[重试] 模型服务暂时不可用，0.5 秒后进行第 1 次重试",
         "[上下文] 对话较长，已整理早期内容",
         "[检查] 文件已经修改，正在补充验证…",
@@ -218,9 +218,22 @@ def test_console_sink_renders_planning_and_memory_as_optional_progress() -> None
         },
     )
     bus.publish(
+        AgentEventKind.PLAN_STEPS_UNTRACKED,
+        model_step=2,
+        details={
+            "first_plan_step": 2,
+            "last_plan_step": 2,
+            "untracked_plan_item_count": 1,
+            "plan_item_count": 2,
+        },
+    )
+    bus.publish(
         AgentEventKind.PLAN_COMPLETED,
         model_step=2,
-        details={"plan_item_count": 2},
+        details={
+            "plan_item_count": 2,
+            "untracked_plan_item_count": 1,
+        },
     )
     bus.publish(
         AgentEventKind.MEMORY_LOADED,
@@ -243,7 +256,8 @@ def test_console_sink_renders_planning_and_memory_as_optional_progress() -> None
         "  2. 输出结果",
         "[进行中] 1/2 检查项目",
         "[已完成] 1/2 检查项目",
-        "[计划] 全部 2 项已完成",
+        "[未关联] 计划 2/2 没有对应到独立的工具操作；不推测其具体完成时间",
+        "[计划] 任务已完成，计划进度结束（共 2 项，1 项未单独关联工具操作）",
         "[记忆] 已加载这个项目最近的 3 条记录",
         "[记忆] 正在整理本轮可供以后参考的项目摘要…",
         "[记忆] 本地记忆文件不可用；本次任务结果不受影响",

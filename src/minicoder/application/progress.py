@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from typing import Any
 
 from minicoder.domain.errors import DomainValidationError
@@ -61,7 +62,25 @@ _MUTATION_KEYWORDS = (
     "编写",
     "修复",
     "新增",
+    "增加",
+    "接入",
+    "补充",
     "重构",
+)
+_TEST_AUTHORING_KEYWORDS = (
+    "test",
+    "tests",
+    "testing",
+    "测试",
+    "用例",
+)
+_DOCUMENTATION_KEYWORDS = (
+    "document",
+    "documentation",
+    "readme",
+    "文档",
+    "说明",
+    "记录",
 )
 _VERIFICATION_KEYWORDS = (
     "verify",
@@ -146,12 +165,38 @@ class PlanStepUpdate:
     completed: bool  # False when starting; True when finishing the item.
 
 
+@dataclass(frozen=True, slots=True)
+class PlanTransition:
+    """One evidence-based plan movement produced by a real agent activity."""
+
+    updates: tuple[PlanStepUpdate, ...] = ()  # Honest start/complete changes.
+    untracked: tuple[PlanStep, ...] = ()  # Items lacking an individual activity.
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolActivity:
+    """Deterministic action and target facts derived from one ToolCall."""
+
+    action_keywords: tuple[str, ...]
+    target_keywords: tuple[str, ...] = ()
+
+    @property
+    def keywords(self) -> tuple[str, ...]:
+        return _unique(self.action_keywords + self.target_keywords)
+
+
 @dataclass(slots=True)
 class PlanProgress:
     """Track the currently displayed item of one model-generated plan."""
 
     items: tuple[str, ...]
     current_index: int = 0
+    _current_has_activity: bool = field(default=False, init=False, repr=False)
+    _untracked_indices: set[int] = field(
+        default_factory=set,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -185,10 +230,15 @@ class PlanProgress:
             for index, item in enumerate(self.items, start=1)
         )
 
+    @property
+    def untracked_count(self) -> int:
+        return len(self._untracked_indices)
+
     def begin(self) -> PlanStepUpdate:
         """Start the first plan item after planning completes."""
 
         self.current_index = 1
+        self._current_has_activity = False
         return PlanStepUpdate(step=self._step(1), completed=False)
 
     def advance_for_tool(
@@ -196,23 +246,37 @@ class PlanProgress:
         call: ToolCall,
         *,
         explicit_step: int | None,
-    ) -> tuple[PlanStepUpdate, ...]:
-        """Select a plan item from an explicit marker or a deterministic fallback."""
+    ) -> PlanTransition:
+        """Associate one real tool activity with the best matching plan item."""
 
-        if explicit_step is not None and 1 <= explicit_step <= self.total:
-            return self._transition_to(explicit_step)
-
-        keywords = _keywords_for_tool(call)
+        activity = _activity_for_tool(call)
         inferred = _matching_step(
             self.items,
-            keywords,
+            activity.keywords,
             start=max(self.current_index, 1),
         )
-        if inferred is None:
-            inferred = max(self.current_index, 1)
-        return self._transition_to(inferred)
+        target = inferred if inferred is not None else max(self.current_index, 1)
+        if (
+            explicit_step is not None
+            and 1 <= explicit_step <= self.total
+            and (
+                not activity.action_keywords
+                or _step_matches_action(
+                    self.items[explicit_step - 1],
+                    activity.action_keywords,
+                )
+                or inferred is None
+            )
+        ):
+            target = explicit_step
 
-    def finish(self) -> tuple[PlanStepUpdate, ...]:
+        target = max(target, self.current_index)
+        if target == self.current_index:
+            self._current_has_activity = True
+            return PlanTransition()
+        return self._transition_to(target)
+
+    def finish(self) -> PlanTransition:
         """Complete the active item; PLAN_COMPLETED closes the whole plan."""
 
         if self.current_index == 0:
@@ -221,25 +285,46 @@ class PlanProgress:
             step=self._step(self.current_index),
             completed=True,
         )
+        untracked = self._mark_untracked(
+            range(self.current_index + 1, self.total + 1)
+        )
         self.current_index = self.total
-        return (update,)
+        self._current_has_activity = False
+        return PlanTransition(updates=(update,), untracked=untracked)
 
-    def _transition_to(self, index: int) -> tuple[PlanStepUpdate, ...]:
+    def _transition_to(self, index: int) -> PlanTransition:
         if index <= self.current_index:
-            return ()
-        updates: list[PlanStepUpdate] = [
-            PlanStepUpdate(
-                step=self._step(self.current_index),
-                completed=True,
+            self._current_has_activity = True
+            return PlanTransition()
+
+        updates: list[PlanStepUpdate] = []
+        untracked_indices: list[int] = []
+        if self._current_has_activity:
+            updates.append(
+                PlanStepUpdate(
+                    step=self._step(self.current_index),
+                    completed=True,
+                )
             )
-        ]
-        for intermediate in range(self.current_index + 1, index):
-            step = self._step(intermediate)
-            updates.append(PlanStepUpdate(step=step, completed=False))
-            updates.append(PlanStepUpdate(step=step, completed=True))
+        else:
+            untracked_indices.append(self.current_index)
+        untracked_indices.extend(range(self.current_index + 1, index))
         self.current_index = index
         updates.append(PlanStepUpdate(step=self._step(index), completed=False))
-        return tuple(updates)
+        self._current_has_activity = True
+        return PlanTransition(
+            updates=tuple(updates),
+            untracked=self._mark_untracked(untracked_indices),
+        )
+
+    def _mark_untracked(self, indices: Iterable[int]) -> tuple[PlanStep, ...]:
+        newly_untracked: list[PlanStep] = []
+        for index in indices:
+            if index in self._untracked_indices:
+                continue
+            self._untracked_indices.add(index)
+            newly_untracked.append(self._step(index))
+        return tuple(newly_untracked)
 
     def _step(self, index: int) -> PlanStep:
         return PlanStep(index=index, total=self.total, text=self.items[index - 1])
@@ -348,25 +433,42 @@ def _matching_step(
     return best_index
 
 
-def _keywords_for_tool(call: ToolCall) -> tuple[str, ...]:
-    if call.name != "run_command":
-        return _TOOL_KEYWORDS.get(call.name, ())
+def _step_matches_action(item: str, keywords: tuple[str, ...]) -> bool:
+    folded = item.casefold()
+    return any(keyword in folded for keyword in keywords)
 
+
+def _activity_for_tool(call: ToolCall) -> _ToolActivity:
     arguments = _json_object(call.arguments_json)
+    if call.name != "run_command":
+        actions = _TOOL_KEYWORDS.get(call.name, ())
+        path = None if arguments is None else arguments.get("path")
+        targets = _target_keywords(path)
+        if call.name in {"create_file", "replace_text"}:
+            if _looks_like_test_path(path):
+                actions = _unique(actions + _TEST_AUTHORING_KEYWORDS)
+            if _looks_like_documentation_path(path):
+                actions = _unique(actions + _DOCUMENTATION_KEYWORDS)
+        if call.name == "search_text" and arguments is not None:
+            targets = _unique(
+                targets + _target_keywords(arguments.get("query"))
+            )
+        return _ToolActivity(actions, targets)
+
     argv = None if arguments is None else arguments.get("argv")
     if not isinstance(argv, list) or not argv or any(
         not isinstance(argument, str) for argument in argv
     ):
-        return ()
+        return _ToolActivity(())
     program = argv[0].replace("\\", "/").rsplit("/", maxsplit=1)[-1].casefold()
     for suffix in (".exe", ".cmd", ".bat", ".com"):
         if program.endswith(suffix):
             program = program[: -len(suffix)]
             break
     if program in _INSPECTION_COMMANDS:
-        return _INSPECTION_KEYWORDS
+        return _ToolActivity(_INSPECTION_KEYWORDS)
     if program in _VERIFICATION_COMMANDS:
-        return _VERIFICATION_KEYWORDS
+        return _ToolActivity(_VERIFICATION_KEYWORDS)
     words = {
         word
         for argument in argv
@@ -374,8 +476,55 @@ def _keywords_for_tool(call: ToolCall) -> tuple[str, ...]:
         if word
     }
     if words & _VERIFICATION_COMMAND_WORDS:
-        return _VERIFICATION_KEYWORDS
-    return ()
+        return _ToolActivity(_VERIFICATION_KEYWORDS)
+    return _ToolActivity(())
+
+
+def _target_keywords(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, str) or not value.strip():
+        return ()
+    normalized = value.strip().replace("\\", "/").casefold()
+    candidates: list[str] = []
+    for part in normalized.split("/"):
+        if not part or part in {".", ".."}:
+            continue
+        candidates.append(part)
+        stem = part.rsplit(".", maxsplit=1)[0]
+        if stem != part:
+            candidates.append(stem)
+        candidates.extend(
+            token
+            for token in re.split(r"[^a-z0-9_+-]+", stem)
+            if len(token) >= 2
+        )
+    return _unique(tuple(candidates))
+
+
+def _looks_like_test_path(value: Any) -> bool:
+    keywords = _target_keywords(value)
+    return any(
+        keyword == "test"
+        or keyword == "tests"
+        or keyword.startswith("test_")
+        or keyword.endswith("_test")
+        for keyword in keywords
+    )
+
+
+def _looks_like_documentation_path(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    normalized = value.replace("\\", "/").casefold()
+    name = normalized.rsplit("/", maxsplit=1)[-1]
+    return (
+        name.startswith("readme")
+        or name.endswith((".md", ".rst"))
+        or "/docs/" in f"/{normalized}"
+    )
+
+
+def _unique(values: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(value for value in values if value))
 
 
 def _json_object(raw: str) -> dict[str, Any] | None:
