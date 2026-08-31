@@ -22,7 +22,6 @@ _NUMBERED_PLAN_LINE = re.compile(
     r"^\s*(?:[-*]\s*)?(\d{1,2})[.)、:：]\s*(.+?)\s*$"
 )
 _BULLET_PLAN_LINE = re.compile(r"^\s*[-*•]\s+(.+?)\s*$")
-_PLAN_STEP_MARKER = re.compile(r"\[plan_step\s*=\s*(\d{1,2})\]", re.IGNORECASE)
 _SAFE_COMMAND_ARGUMENT = re.compile(r"[A-Za-z0-9_./:@%+=,-]+")
 _ANSI_ESCAPE_SEQUENCE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _TERMINAL_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -196,13 +195,12 @@ class PlanProgress:
         self,
         call: ToolCall,
         *,
-        assistant_content: str | None,
+        explicit_step: int | None,
     ) -> tuple[PlanStepUpdate, ...]:
         """Select a plan item from an explicit marker or a deterministic fallback."""
 
-        explicit = _explicit_step(assistant_content, total=self.total)
-        if explicit is not None:
-            return self._transition_to(explicit)
+        if explicit_step is not None and 1 <= explicit_step <= self.total:
+            return self._transition_to(explicit_step)
 
         keywords = _keywords_for_tool(call)
         inferred = _matching_step(
@@ -215,23 +213,16 @@ class PlanProgress:
         return self._transition_to(inferred)
 
     def finish(self) -> tuple[PlanStepUpdate, ...]:
-        """Complete every remaining item in order before whole-plan completion."""
+        """Complete the active item; PLAN_COMPLETED closes the whole plan."""
 
-        updates: list[PlanStepUpdate] = []
         if self.current_index == 0:
-            updates.append(self.begin())
-        updates.append(
-            PlanStepUpdate(
-                step=self._step(self.current_index),
-                completed=True,
-            )
+            self.begin()
+        update = PlanStepUpdate(
+            step=self._step(self.current_index),
+            completed=True,
         )
-        for index in range(self.current_index + 1, self.total + 1):
-            step = self._step(index)
-            updates.append(PlanStepUpdate(step=step, completed=False))
-            updates.append(PlanStepUpdate(step=step, completed=True))
         self.current_index = self.total
-        return tuple(updates)
+        return (update,)
 
     def _transition_to(self, index: int) -> tuple[PlanStepUpdate, ...]:
         if index <= self.current_index:
@@ -336,16 +327,6 @@ def _parse_plan_items(text: str) -> tuple[str, ...]:
 def _clean_plan_item(text: str) -> str:
     compact = _remove_terminal_controls(" ".join(text.split())).strip(" *_`")
     return _truncate(compact or "执行当前步骤", _MAX_PLAN_ITEM_CHARS)
-
-
-def _explicit_step(content: str | None, *, total: int) -> int | None:
-    if not content:
-        return None
-    match = _PLAN_STEP_MARKER.search(content)
-    if match is None:
-        return None
-    index = int(match.group(1))
-    return index if 1 <= index <= total else None
 
 
 def _matching_step(

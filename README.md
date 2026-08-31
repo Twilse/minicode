@@ -69,20 +69,28 @@ export MINICODER_CONTEXT_BUDGET_CHARS=300000
 
 Planning is enabled by default. At the start of every user turn, the first model
 request receives no tool definitions and may only return a concise numbered
-plan. MiniCoder then adds an execution instruction and makes the tools available.
+action plan. Plan size follows task complexity: a direct answer should use one
+item, read-only inspection two or three, and code changes three to seven.
+MiniCoder then adds an execution instruction and makes the tools available.
 The system prompt tells the model to follow that plan unless file contents, tool
 results, errors, or safety rules provide a concrete reason to adapt it. The plan
 remains in normal conversation history and its model request counts toward
 `MINICODER_MAX_STEPS`.
 
-The console prints the bounded plan items and emits an ordered “started” and
-“completed” status for every item. Even if a model directly associates a tool
-with a later plan item, MiniCoder closes and displays each intermediate item in
-sequence instead of jumping over its number. Compatible models may attach
-`[plan_step=N]` to a tool-calling response for an exact association. When a
-provider omits tool-call content, MiniCoder falls back to a deterministic mapping
-from read/search, create/replace, and command tools to inspection,
-implementation, and verification plan items.
+The console prints the bounded plan items and emits ordered “started” and
+“completed” transitions while tools move through the plan. Even if a model
+directly associates a tool with a later item, MiniCoder closes and displays each
+intermediate item in sequence instead of jumping over its number. The terminal
+whole-plan event closes any remaining items without inventing individual tool
+work for them.
+
+Compatible models may attach `[plan_step=N]` to a tool-calling response for an
+exact association. This is reserved host metadata: the application decodes it
+immediately after the Model Port returns and removes it before conversation
+history or final user-visible text is created. When a provider omits tool-call
+content, MiniCoder falls back to a deterministic mapping from read/search,
+create/replace, and command tools to inspection, implementation, and
+verification plan items.
 
 Planning can be disabled for providers or small models that do not handle this
 two-phase interaction well:

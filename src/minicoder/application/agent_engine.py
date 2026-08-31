@@ -11,6 +11,7 @@ from minicoder.application.completion import (
 )
 from minicoder.application.context import ContextManager
 from minicoder.application.event_bus import EventBus
+from minicoder.application.model_protocol import decode_assistant_turn
 from minicoder.application.ports import ModelPort, ToolPort
 from minicoder.application.progress import (
     PlanProgress,
@@ -43,10 +44,13 @@ DEFAULT_SYSTEM_PROMPT = (
 _PROJECT_MEMORY_CONTEXT_CHARS = 6_000
 _PLANNING_REQUIREMENT = (
     "[Host planning requirement]\n"
-    "Before any tool use, return only a concise numbered plan of 3 to 7 steps for "
-    "the current request. Base it on the available conversation and project memory. "
-    "Include inspection before editing and relevant verification after changes. Do "
-    "not execute the task, call tools, or claim completion in this response."
+    "Before any tool use, return only a concise numbered action plan proportional "
+    "to the current request. Use exactly 1 step for a direct answer that needs no "
+    "tools, 2 to 3 steps for read-only inspection, and 3 to 7 steps for code changes. "
+    "Describe actions, not an outline of the final answer. Base the plan on available "
+    "conversation and project memory. Include inspection before editing and relevant "
+    "verification after changes. Do not execute the task, call tools, include answer "
+    "facts, or claim completion in this response."
 )
 _EXECUTION_REQUIREMENT = (
     "[Host execution requirement]\n"
@@ -54,7 +58,8 @@ _EXECUTION_REQUIREMENT = (
     "without evidence. If file contents, tool results, errors, or safety rules "
     "invalidate a step, adapt the remaining steps while preserving the current user "
     "goal. When calling tools, put [plan_step=N] in the assistant content to identify "
-    "the current numbered item. Do not skip required verification."
+    "the current numbered item. This is a host annotation: use it only in a response "
+    "that calls tools, never in the final answer. Do not skip required verification."
 )
 
 
@@ -243,7 +248,7 @@ class AgentEngine:
                 },
             )
             try:
-                turn = self._retries.run(
+                raw_turn = self._retries.run(
                     lambda: self._model.complete(
                         messages=window.messages,
                         tools=advertised_definitions,
@@ -253,6 +258,9 @@ class AgentEngine:
                         attempt,
                     ),
                 )
+                decoded_turn = decode_assistant_turn(raw_turn)
+                turn = decoded_turn.turn
+                annotated_plan_step = decoded_turn.plan_step
             except KeyboardInterrupt:
                 self._record_user_interruption(state)
                 raise
@@ -329,7 +337,7 @@ class AgentEngine:
                     if plan_progress is not None:
                         plan_updates = plan_progress.advance_for_tool(
                             call,
-                            assistant_content=turn.content,
+                            explicit_step=annotated_plan_step,
                         )
                         for update in plan_updates:
                             self._record_plan_update(

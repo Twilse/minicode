@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 
-from minicoder.application.progress import PlanProgress, tool_display_details
+from minicoder.application.progress import (
+    PlanProgress,
+    tool_display_details,
+)
 from minicoder.domain.models import ToolCall
 
 
@@ -25,15 +28,15 @@ def test_plan_progress_parses_items_and_infers_tool_stages() -> None:
     first = progress.begin()
     inspection = progress.advance_for_tool(
         _call("run_command", {"argv": ["git", "status", "--short"]}),
-        assistant_content=None,
+        explicit_step=None,
     )
     mutation = progress.advance_for_tool(
         _call("replace_text", {"path": "app.py"}),
-        assistant_content=None,
+        explicit_step=None,
     )
     verification = progress.advance_for_tool(
         _call("run_command", {"argv": ["python", "-m", "pytest"]}),
-        assistant_content=None,
+        explicit_step=None,
     )
 
     assert progress.items == (
@@ -64,7 +67,7 @@ def test_explicit_plan_step_marker_takes_priority_over_tool_inference() -> None:
 
     updates = progress.advance_for_tool(
         _call("read_file", {"path": "app.py"}),
-        assistant_content="[plan_step=2] Continuing the implementation.",
+        explicit_step=2,
     )
 
     assert updates[-1].step.index == 2
@@ -80,7 +83,7 @@ def test_plan_progress_emits_every_intermediate_item_in_order() -> None:
 
     updates = progress.advance_for_tool(
         _call("run_command", {"argv": ["python", "-m", "pytest"]}),
-        assistant_content="[plan_step=4] Running verification.",
+        explicit_step=4,
     )
 
     assert [(update.step.index, update.completed) for update in updates] == [
@@ -91,6 +94,20 @@ def test_plan_progress_emits_every_intermediate_item_in_order() -> None:
         (3, True),
         (4, False),
     ]
+
+
+def test_plan_finish_closes_only_the_active_item_before_whole_plan_completion() -> None:
+    progress = PlanProgress.from_model_text(
+        "1. Answer the question.\n2. Add supporting details.\n3. Summarize."
+    )
+    progress.begin()
+
+    updates = progress.finish()
+
+    assert [(update.step.index, update.completed) for update in updates] == [
+        (1, True)
+    ]
+    assert progress.current_index == 3
 
 
 def test_tool_display_details_expose_targets_without_file_bodies() -> None:

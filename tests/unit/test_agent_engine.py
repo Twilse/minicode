@@ -106,6 +106,10 @@ def test_engine_plans_without_tools_before_following_the_plan() -> None:
     assert "default execution contract" in execution_requirement
     assert "adapt the remaining steps" in execution_requirement
     assert "[plan_step=N]" in execution_requirement
+    assert "never in the final answer" in execution_requirement
+    planning_requirement = model.requests[0].messages[-1].content or ""
+    assert "exactly 1 step for a direct answer" in planning_requirement
+    assert "not an outline of the final answer" in planning_requirement
     third_request = model.requests[2].messages
     assert third_request[-1].role is MessageRole.TOOL
     assert "FILE_NOT_FOUND" in (third_request[-1].content or "")
@@ -121,10 +125,6 @@ def test_engine_plans_without_tools_before_following_the_plan() -> None:
         AgentEventKind.TOOL_FINISHED,
         AgentEventKind.MODEL_REQUESTED,
         AgentEventKind.PLAN_STEP_COMPLETED,
-        AgentEventKind.PLAN_STEP_STARTED,
-        AgentEventKind.PLAN_STEP_COMPLETED,
-        AgentEventKind.PLAN_STEP_STARTED,
-        AgentEventKind.PLAN_STEP_COMPLETED,
         AgentEventKind.PLAN_COMPLETED,
         AgentEventKind.TASK_COMPLETED,
     ]
@@ -135,14 +135,43 @@ def test_engine_plans_without_tools_before_following_the_plan() -> None:
     assert observed.events[5].details["request_kind"] == "execution"
     assert [
         (event.details["plan_step"], event.kind)
-        for event in observed.events[9:14]
+        for event in observed.events[9:10]
     ] == [
         (1, AgentEventKind.PLAN_STEP_COMPLETED),
-        (2, AgentEventKind.PLAN_STEP_STARTED),
-        (2, AgentEventKind.PLAN_STEP_COMPLETED),
-        (3, AgentEventKind.PLAN_STEP_STARTED),
-        (3, AgentEventKind.PLAN_STEP_COMPLETED),
     ]
+
+
+def test_engine_removes_reserved_annotations_from_any_final_response() -> None:
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(
+                content=(
+                    "[plan_step=1] I remember the todo project.\n\n"
+                    "[plan_step=2] No files were changed."
+                )
+            )
+        ]
+    )
+    engine = AgentEngine(model=model, tools=FakeToolAdapter(), max_steps=1)
+
+    result = engine.run("Summarize the remembered project")
+
+    assert result.final_response == (
+        "I remember the todo project.\n\nNo files were changed."
+    )
+    assert "[plan_step=" not in (result.messages[-1].content or "")
+
+
+def test_engine_rejects_a_final_response_containing_only_host_annotations() -> None:
+    model = FakeModelAdapter([AssistantTurn(content="[plan_step=1]")])
+    engine = AgentEngine(model=model, tools=FakeToolAdapter(), max_steps=1)
+
+    result = engine.run("Answer the question")
+
+    assert result.phase is AgentPhase.FAILED
+    assert result.stop_reason is AgentStopReason.MODEL_ERROR
+    assert result.final_response is None
+    assert "reserved host annotations" in (result.failure_message or "")
 
 
 def test_engine_counts_planning_against_the_model_step_limit() -> None:
