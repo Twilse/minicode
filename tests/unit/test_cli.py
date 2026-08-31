@@ -81,7 +81,7 @@ def test_check_config_rejects_invalid_project_verifiers(tmp_path: Path) -> None:
     )
 
     assert exit_code == 2
-    assert "verification.commands must be an array" in stderr.getvalue()
+    assert "verification.commands 必须是数组" in stderr.getvalue()
 
 
 def test_check_config_returns_two_for_user_configuration_error(
@@ -97,7 +97,7 @@ def test_check_config_returns_two_for_user_configuration_error(
     )
 
     assert exit_code == 2
-    assert "MINICODER_API_KEY is required" in stderr.getvalue()
+    assert "缺少必需的环境变量 MINICODER_API_KEY" in stderr.getvalue()
 
 
 def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
@@ -141,8 +141,13 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
     assert stdout.getvalue().splitlines() == [
         "[开始] 正在处理你的任务（本轮最多 20 个步骤）",
         "[计划] 正在制定本轮执行计划…",
-        "[计划] 已生成，开始按照计划处理",
+        "[计划] 已生成，共 2 项：",
+        "  1. Inspect the project.",
+        "  2. Report the result.",
+        "[进行中] 1/2 Inspect the project.",
         "[分析] 正在规划下一步（步骤 2）",
+        "[进行中] 2/2 Report the result.",
+        "[计划] 全部 2 项已完成",
         "[完成] 任务已完成（共 2 个步骤）",
         "Task completed safely.",
     ]
@@ -157,7 +162,10 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
         "planning_started",
         "model_requested",
         "planning_completed",
+        "plan_step_started",
         "model_requested",
+        "plan_step_started",
+        "plan_completed",
         "task_completed",
     ]
 
@@ -276,7 +284,7 @@ def test_interactive_cli_returns_130_when_input_is_interrupted(
     )
 
     assert exit_code == 130
-    assert "interrupted by user" in stderr.getvalue()
+    assert "任务被用户中断" in stderr.getvalue()
     assert model.requests == []
 
 
@@ -301,7 +309,7 @@ def test_cli_rejects_trace_path_with_missing_parent(tmp_path: Path) -> None:
     )
 
     assert exit_code == 2
-    assert "trace error" in stderr.getvalue()
+    assert "跟踪文件配置错误" in stderr.getvalue()
 
 
 def test_cli_returns_one_for_a_model_failure(
@@ -333,7 +341,8 @@ def test_cli_returns_one_for_a_model_failure(
 
     assert exit_code == 1
     assert "[失败] 模型服务请求失败" in stdout.getvalue()
-    assert "agent failed: Model request failed" in stderr.getvalue()
+    assert "模型服务请求失败" in stderr.getvalue()
+    assert "network unavailable" not in stderr.getvalue()
 
 
 def test_cli_renders_model_markdown_instead_of_printing_fence_markers(

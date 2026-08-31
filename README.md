@@ -45,7 +45,8 @@ python -m minicoder \
 
 The trace records event order, model steps, tool names, call IDs, status, error
 codes, and character counts. It intentionally excludes API keys, user task text,
-tool argument/output bodies, final response bodies, and model reasoning content.
+displayed plan text, displayed paths and commands, tool argument/output bodies,
+final response bodies, and model reasoning content.
 
 Each new interactive user turn receives a fresh model-step allowance while prior
 messages and completion evidence remain available to the session.
@@ -59,6 +60,13 @@ The system prompt tells the model to follow that plan unless file contents, tool
 results, errors, or safety rules provide a concrete reason to adapt it. The plan
 remains in normal conversation history and its model request counts toward
 `MINICODER_MAX_STEPS`.
+
+The console prints the bounded plan items, identifies the current item while work
+is in progress, and reports when all items complete. Compatible models may attach
+`[plan_step=N]` to a tool-calling response for an exact association. When a
+provider omits tool-call content, MiniCoder falls back to a deterministic mapping
+from read/search, create/replace, and command tools to inspection,
+implementation, and verification plan items.
 
 Planning can be disabled for providers or small models that do not handle this
 two-phase interaction well:
@@ -106,10 +114,14 @@ text character-aware Backspace handling and normal line history instead of
 editing raw UTF-8 bytes. Injected streams keep a deterministic plain line reader
 for tests and redirected input.
 
-The default console shows user-facing Chinese progress such as “正在读取文件” and
-“C/C++ 编译检查已通过”. Successful tool-completion noise, internal tool names,
-call IDs, message counts, and provider error classes are omitted. The optional
-JSONL trace retains the sanitized technical event fields for diagnosis.
+The default console shows user-facing Chinese progress and the exact tool name,
+target path, search query, or bounded command needed to understand each action.
+It never displays create/replace text bodies or internal call IDs, and common
+API-key, token, password, authorization, credential, and secret command arguments
+are redacted. Successful completion noise, message counts, and provider exception
+class names remain omitted. Tool failures and terminal CLI failures use concise
+Chinese explanations with actionable guidance. The optional JSONL trace retains
+only the sanitized technical event fields for diagnosis.
 
 Final model responses are rendered as Markdown with Rich, including headings,
 lists, inline emphasis, and syntax-highlighted fenced code blocks. Valid fence

@@ -77,7 +77,12 @@ def test_console_sink_renders_concise_event_lines() -> None:
     bus.publish(
         AgentEventKind.TOOL_CALLED,
         model_step=1,
-        details={"tool_name": "read_file", "call_id": "call-1"},
+        details={
+            "tool_name": "read_file",
+            "call_id": "call-1",
+            "display_path": "src/app.py",
+            "display_offset": 0,
+        },
     )
     bus.publish(
         AgentEventKind.TOOL_FINISHED,
@@ -107,8 +112,8 @@ def test_console_sink_renders_concise_event_lines() -> None:
         "[上下文] 对话较长，已整理早期内容",
         "[检查] 文件已经修改，正在补充验证…",
         "[检查] 当前验证方式未识别，正在改用受支持的验证命令…",
-        "[操作] 正在读取文件…",
-        "[注意] 读取文件未成功；结果已返回给 MiniCoder",
+        "[操作] 使用 read_file 读取文件：src/app.py（从字符 0 开始）",
+        "[错误] read_file 读取文件失败：目标文件或目录不存在；MiniCoder 将根据结果继续处理",
         "[验证] pytest 测试已通过",
         "[失败] 模型服务请求失败",
     ]
@@ -121,7 +126,11 @@ def test_console_sink_omits_success_noise_and_internal_call_ids() -> None:
     bus.publish(
         AgentEventKind.TOOL_CALLED,
         model_step=1,
-        details={"tool_name": "create_file", "call_id": "private-call-id"},
+        details={
+            "tool_name": "create_file",
+            "call_id": "private-call-id",
+            "display_path": "created.py",
+        },
     )
     bus.publish(
         AgentEventKind.TOOL_FINISHED,
@@ -134,8 +143,42 @@ def test_console_sink_omits_success_noise_and_internal_call_ids() -> None:
         },
     )
 
-    assert output.getvalue().splitlines() == ["[操作] 正在创建文件…"]
+    assert output.getvalue().splitlines() == [
+        "[操作] 使用 create_file 创建文件：created.py"
+    ]
     assert "private-call-id" not in output.getvalue()
+
+
+def test_console_sink_shows_command_and_chinese_failure_reason() -> None:
+    output = StringIO()
+    bus = EventBus((ConsoleEventSink(output),), run_id="run-command-error")
+
+    bus.publish(
+        AgentEventKind.TOOL_CALLED,
+        model_step=2,
+        details={
+            "tool_name": "run_command",
+            "call_id": "call-command",
+            "display_command": "python -m pytest -q",
+        },
+    )
+    bus.publish(
+        AgentEventKind.TOOL_FINISHED,
+        model_step=2,
+        details={
+            "tool_name": "run_command",
+            "call_id": "call-command",
+            "ok": False,
+            "error_code": "COMMAND_FAILED",
+            "exit_code": 2,
+        },
+    )
+
+    assert output.getvalue().splitlines() == [
+        "[操作] 使用 run_command 执行命令：python -m pytest -q",
+        "[错误] run_command 运行命令失败：命令返回了非零退出码"
+        "（退出码 2）；MiniCoder 将根据结果继续处理",
+    ]
 
 
 def test_console_sink_renders_planning_and_memory_as_optional_progress() -> None:
@@ -148,7 +191,28 @@ def test_console_sink_renders_planning_and_memory_as_optional_progress() -> None
         model_step=1,
         details={"request_kind": "planning"},
     )
-    bus.publish(AgentEventKind.PLANNING_COMPLETED, model_step=1)
+    bus.publish(
+        AgentEventKind.PLANNING_COMPLETED,
+        model_step=1,
+        details={
+            "plan_item_count": 2,
+            "display_plan": "1. 检查项目\n2. 输出结果",
+        },
+    )
+    bus.publish(
+        AgentEventKind.PLAN_STEP_STARTED,
+        model_step=1,
+        details={
+            "plan_step": 1,
+            "plan_item_count": 2,
+            "display_plan_step": "检查项目",
+        },
+    )
+    bus.publish(
+        AgentEventKind.PLAN_COMPLETED,
+        model_step=2,
+        details={"plan_item_count": 2},
+    )
     bus.publish(
         AgentEventKind.MEMORY_LOADED,
         model_step=0,
@@ -165,7 +229,11 @@ def test_console_sink_renders_planning_and_memory_as_optional_progress() -> None
 
     assert output.getvalue().splitlines() == [
         "[计划] 正在制定本轮执行计划…",
-        "[计划] 已生成，开始按照计划处理",
+        "[计划] 已生成，共 2 项：",
+        "  1. 检查项目",
+        "  2. 输出结果",
+        "[进行中] 1/2 检查项目",
+        "[计划] 全部 2 项已完成",
         "[记忆] 已加载这个项目最近的 3 条记录",
         "[记忆] 正在整理本轮可供以后参考的项目摘要…",
         "[记忆] 本地记忆文件不可用；本次任务结果不受影响",
@@ -184,7 +252,11 @@ def test_jsonl_sink_appends_parseable_versioned_records(tmp_path: Path) -> None:
     bus.publish(
         AgentEventKind.TASK_STARTED,
         model_step=0,
-        details={"tool_count": 7, "label": "中文"},
+        details={
+            "tool_count": 7,
+            "label": "中文",
+            "display_private_path": "private/source.py",
+        },
     )
     bus.publish(
         AgentEventKind.TASK_COMPLETED,
@@ -206,6 +278,7 @@ def test_jsonl_sink_appends_parseable_versioned_records(tmp_path: Path) -> None:
         "model_step": 0,
         "details": {"tool_count": 7, "label": "中文"},
     }
+    assert "private/source.py" not in trace_path.read_text(encoding="utf-8")
     assert records[1]["type"] == "task_completed"
 
 

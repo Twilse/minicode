@@ -12,6 +12,11 @@ from minicoder.application.completion import (
 from minicoder.application.context import ContextManager
 from minicoder.application.event_bus import EventBus
 from minicoder.application.ports import ModelPort, ToolPort
+from minicoder.application.progress import (
+    PlanProgress,
+    PlanStep,
+    tool_display_details,
+)
 from minicoder.application.retry import (
     ExponentialBackoffRetryStrategy,
     RetryAttempt,
@@ -48,7 +53,8 @@ _EXECUTION_REQUIREMENT = (
     "Now execute the plan above as the default execution contract. Do not ignore it "
     "without evidence. If file contents, tool results, errors, or safety rules "
     "invalidate a step, adapt the remaining steps while preserving the current user "
-    "goal. Do not skip required verification."
+    "goal. When calling tools, put [plan_step=N] in the assistant content to identify "
+    "the current numbered item. Do not skip required verification."
 )
 
 
@@ -172,6 +178,7 @@ class AgentEngine:
             },
         )
         planning_pending = self._planning_enabled
+        plan_progress: PlanProgress | None = None
         if planning_pending:
             self._events.publish(
                 AgentEventKind.PLANNING_STARTED,
@@ -299,10 +306,19 @@ class AgentEngine:
                 )
                 state.plan_ready()
                 planning_pending = False
+                plan_progress = PlanProgress.from_model_text(turn.content or "")
                 self._events.publish(
                     AgentEventKind.PLANNING_COMPLETED,
                     model_step=state.model_steps,
-                    details={"plan_chars": len(turn.content or "")},
+                    details={
+                        "plan_chars": len(turn.content or ""),
+                        "plan_item_count": plan_progress.total,
+                        "display_plan": plan_progress.display_text,
+                    },
+                )
+                self._record_plan_step(
+                    plan_progress.begin(),
+                    model_step=state.model_steps,
                 )
                 continue
 
@@ -310,12 +326,23 @@ class AgentEngine:
             if turn.tool_calls:
                 state.begin_tool_execution()
                 for call in turn.tool_calls:
+                    if plan_progress is not None:
+                        plan_step = plan_progress.advance_for_tool(
+                            call,
+                            assistant_content=turn.content,
+                        )
+                        if plan_step is not None:
+                            self._record_plan_step(
+                                plan_step,
+                                model_step=state.model_steps,
+                            )
                     self._events.publish(
                         AgentEventKind.TOOL_CALLED,
                         model_step=state.model_steps,
                         details={
                             "call_id": call.id,
                             "tool_name": call.name,
+                            **tool_display_details(call),
                         },
                     )
                     try:
@@ -324,16 +351,23 @@ class AgentEngine:
                         self._record_user_interruption(state)
                         raise
                     messages.append(result.as_message())
+                    finished_details = {
+                        "call_id": result.call_id,
+                        "tool_name": result.tool_name,
+                        "ok": result.ok,
+                        "error_code": result.error_code,
+                        "content_chars": len(result.content),
+                    }
+                    exit_code = result.metadata.get("exit_code")
+                    if isinstance(exit_code, int) and not isinstance(exit_code, bool):
+                        finished_details["exit_code"] = exit_code
+                    timed_out = result.metadata.get("timed_out")
+                    if isinstance(timed_out, bool):
+                        finished_details["timed_out"] = timed_out
                     self._events.publish(
                         AgentEventKind.TOOL_FINISHED,
                         model_step=state.model_steps,
-                        details={
-                            "call_id": result.call_id,
-                            "tool_name": result.tool_name,
-                            "ok": result.ok,
-                            "error_code": result.error_code,
-                            "content_chars": len(result.content),
-                        },
+                        details=finished_details,
                     )
                     observation = self._completion.observe_tool(
                         call,
@@ -387,6 +421,18 @@ class AgentEngine:
                 continue
 
             state.complete()
+            if plan_progress is not None:
+                final_step = plan_progress.finish()
+                if final_step is not None:
+                    self._record_plan_step(
+                        final_step,
+                        model_step=state.model_steps,
+                    )
+                self._events.publish(
+                    AgentEventKind.PLAN_COMPLETED,
+                    model_step=state.model_steps,
+                    details={"plan_item_count": plan_progress.total},
+                )
             self._events.publish(
                 AgentEventKind.TASK_COMPLETED,
                 model_step=state.model_steps,
@@ -458,6 +504,17 @@ class AgentEngine:
             AgentEventKind.VERIFICATION_PASSED,
             model_step=observation.model_step,
             details={"verification_kind": observation.kind},
+        )
+
+    def _record_plan_step(self, step: PlanStep, *, model_step: int) -> None:
+        self._events.publish(
+            AgentEventKind.PLAN_STEP_STARTED,
+            model_step=model_step,
+            details={
+                "plan_step": step.index,
+                "plan_item_count": step.total,
+                "display_plan_step": step.text,
+            },
         )
 
 

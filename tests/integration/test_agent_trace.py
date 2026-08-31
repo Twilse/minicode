@@ -15,6 +15,7 @@ def test_agent_jsonl_trace_excludes_message_and_tool_bodies(tmp_path: Path) -> N
     argument_marker = "tool-argument-body-must-not-appear"
     reasoning_marker = "reasoning-must-not-appear"
     final_marker = "final-response-body-must-not-appear"
+    plan_marker = "plan-body-must-not-appear"
     context = ApplicationFactory.create_bootstrap_context(
         environ={
             "MINICODER_API_KEY": api_key_marker,
@@ -43,7 +44,9 @@ def test_agent_jsonl_trace_excludes_message_and_tool_bodies(tmp_path: Path) -> N
     )
     model = FakeModelAdapter(
         [
-            AssistantTurn(content="1. Create the file.\n2. Verify it."),
+            AssistantTurn(
+                content=f"1. Create the file ({plan_marker}).\n2. Verify it."
+            ),
             AssistantTurn(
                 content=None,
                 tool_calls=(call,),
@@ -71,23 +74,31 @@ def test_agent_jsonl_trace_excludes_message_and_tool_bodies(tmp_path: Path) -> N
         argument_marker,
         reasoning_marker,
         final_marker,
+        plan_marker,
     ):
         assert forbidden not in trace_text
     records = [json.loads(line) for line in trace_text.splitlines()]
-    assert [record["sequence"] for record in records] == list(range(1, 14))
+    assert [record["sequence"] for record in records] == list(range(1, 17))
     assert [record["type"] for record in records] == [
         "task_started",
         "planning_started",
         "model_requested",
         "planning_completed",
+        "plan_step_started",
         "model_requested",
         "tool_called",
         "tool_finished",
         "model_requested",
+        "plan_step_started",
         "tool_called",
         "tool_finished",
         "verification_passed",
         "model_requested",
+        "plan_completed",
         "task_completed",
     ]
-    assert records[6]["details"]["content_chars"] > 0
+    assert records[7]["details"]["content_chars"] > 0
+    assert all(
+        not any(name.startswith("display_") for name in record["details"])
+        for record in records
+    )

@@ -38,7 +38,11 @@ class JsonlTraceSink:
             "timestamp": timestamp,
             "type": event.kind.value,
             "model_step": event.model_step,
-            "details": dict(event.details),
+            "details": {
+                name: value
+                for name, value in event.details.items()
+                if not name.startswith("display_")
+            },
         }
         line = json.dumps(
             record,

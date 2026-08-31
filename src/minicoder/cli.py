@@ -8,7 +8,11 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Mapping, TextIO
 
-from minicoder.adapters.console import ConsoleEventSink
+from minicoder.adapters.console import (
+    ConsoleEventSink,
+    format_agent_failure,
+    format_minicoder_error,
+)
 from minicoder.adapters.jsonl_trace import JsonlTraceSink
 from minicoder.adapters.terminal_ui import (
     InteractiveLineReader,
@@ -78,7 +82,7 @@ def main(
             workspace=args.workspace,
         )
     except MiniCoderError as exc:
-        print(f"configuration error: {exc}", file=error_output)
+        print(format_minicoder_error(exc), file=error_output)
         return 2
 
     if args.check_config:
@@ -89,8 +93,11 @@ def main(
     if args.trace is not None:
         try:
             event_sinks.append(JsonlTraceSink(args.trace))
-        except ValueError as exc:
-            print(f"trace error: {exc}", file=error_output)
+        except ValueError:
+            print(
+                "跟踪文件配置错误：请确认父目录已经存在，并且目标路径是普通文件。",
+                file=error_output,
+            )
             return 2
 
     try:
@@ -108,10 +115,10 @@ def main(
             )
         result = session.run(args.task)
     except KeyboardInterrupt:
-        print("agent interrupted by user", file=error_output)
+        print("MiniCoder 已停止：任务被用户中断。", file=error_output)
         return 130
     except MiniCoderError as exc:
-        print(f"agent error: {exc}", file=error_output)
+        print(format_minicoder_error(exc), file=error_output)
         return 1
 
     _print_event_failures(session, error_output=error_output)
@@ -119,7 +126,7 @@ def main(
     if result.phase is AgentPhase.COMPLETE:
         renderer.render(result.final_response or "")
         return 0
-    print(f"agent failed: {result.failure_message}", file=error_output)
+    print(format_agent_failure(result), file=error_output)
     return 1
 
 
@@ -159,10 +166,7 @@ def _run_interactive(
                 renderer.render(result.final_response or "")
                 last_exit_code = 0
             else:
-                print(
-                    f"agent failed: {result.failure_message}",
-                    file=error_output,
-                )
+                print(format_agent_failure(result), file=error_output)
                 last_exit_code = 1
 
 
@@ -175,7 +179,8 @@ def _print_event_failures(
     failures = session.event_failures
     for failure in failures[start:]:
         print(
-            f"event sink warning: {failure.sink_type}: {failure.message}",
+            "事件输出警告：某个进度记录器未能处理事件；"
+            f"类型={failure.sink_type}。",
             file=error_output,
         )
     return len(failures)

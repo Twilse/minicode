@@ -105,6 +105,7 @@ def test_engine_plans_without_tools_before_following_the_plan() -> None:
     execution_requirement = model.requests[1].messages[-1].content or ""
     assert "default execution contract" in execution_requirement
     assert "adapt the remaining steps" in execution_requirement
+    assert "[plan_step=N]" in execution_requirement
     third_request = model.requests[2].messages
     assert third_request[-1].role is MessageRole.TOOL
     assert "FILE_NOT_FOUND" in (third_request[-1].content or "")
@@ -114,14 +115,21 @@ def test_engine_plans_without_tools_before_following_the_plan() -> None:
         AgentEventKind.PLANNING_STARTED,
         AgentEventKind.MODEL_REQUESTED,
         AgentEventKind.PLANNING_COMPLETED,
+        AgentEventKind.PLAN_STEP_STARTED,
         AgentEventKind.MODEL_REQUESTED,
         AgentEventKind.TOOL_CALLED,
         AgentEventKind.TOOL_FINISHED,
         AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.PLAN_STEP_STARTED,
+        AgentEventKind.PLAN_COMPLETED,
         AgentEventKind.TASK_COMPLETED,
     ]
     assert observed.events[2].details["request_kind"] == "planning"
-    assert observed.events[4].details["request_kind"] == "execution"
+    assert observed.events[3].details["plan_item_count"] == 3
+    assert observed.events[3].details["display_plan"] == plan
+    assert observed.events[4].details["plan_step"] == 1
+    assert observed.events[5].details["request_kind"] == "execution"
+    assert observed.events[9].details["plan_step"] == 3
 
 
 def test_engine_counts_planning_against_the_model_step_limit() -> None:
