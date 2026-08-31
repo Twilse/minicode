@@ -30,8 +30,9 @@ def test_check_config_prints_safe_summary(tmp_path: Path) -> None:
     assert "configuration is valid" in stdout.getvalue()
     assert "deepseek-v4-pro" in stdout.getvalue()
     assert "verification_commands=0" in stdout.getvalue()
+    assert "context_budget_chars=180000" in stdout.getvalue()
     assert "planning_enabled=True" in stdout.getvalue()
-    assert "memory_enabled=False" in stdout.getvalue()
+    assert "memory_enabled=True" in stdout.getvalue()
     assert "never-print-this" not in stdout.getvalue()
     assert stderr.getvalue() == ""
 
@@ -132,6 +133,7 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
             "MINICODER_API_KEY": "secret-key-not-in-trace",
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "test-model",
+            "MINICODER_MEMORY_ENABLED": "false",
         },
         stdout=stdout,
         stderr=stderr,
@@ -146,7 +148,9 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
         "  2. Report the result.",
         "[进行中] 1/2 Inspect the project.",
         "[分析] 正在规划下一步（步骤 2）",
+        "[已完成] 1/2 Inspect the project.",
         "[进行中] 2/2 Report the result.",
+        "[已完成] 2/2 Report the result.",
         "[计划] 全部 2 项已完成",
         "[完成] 任务已完成（共 2 个步骤）",
         "Task completed safely.",
@@ -164,7 +168,9 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
         "planning_completed",
         "plan_step_started",
         "model_requested",
+        "plan_step_completed",
         "plan_step_started",
+        "plan_step_completed",
         "plan_completed",
         "task_completed",
     ]
@@ -199,6 +205,7 @@ def test_cli_without_a_task_runs_an_interactive_multi_turn_session(
             "MINICODER_API_KEY": "not-used",
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "test-model",
+            "MINICODER_MEMORY_ENABLED": "false",
         },
         stdin=StringIO(
             "Which language does this project use?\n"
@@ -245,6 +252,7 @@ def test_interactive_cli_exits_cleanly_on_eof_without_calling_the_model(
             "MINICODER_API_KEY": "not-used",
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "test-model",
+            "MINICODER_MEMORY_ENABLED": "false",
         },
         stdin=StringIO(""),
         stdout=StringIO(),
@@ -277,6 +285,7 @@ def test_interactive_cli_returns_130_when_input_is_interrupted(
             "MINICODER_API_KEY": "not-used",
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "test-model",
+            "MINICODER_MEMORY_ENABLED": "false",
         },
         stdin=InterruptingInput(),
         stdout=StringIO(),
@@ -303,6 +312,7 @@ def test_cli_rejects_trace_path_with_missing_parent(tmp_path: Path) -> None:
             "MINICODER_API_KEY": "not-used",
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
+            "MINICODER_MEMORY_ENABLED": "false",
         },
         stdout=StringIO(),
         stderr=stderr,
@@ -334,6 +344,7 @@ def test_cli_returns_one_for_a_model_failure(
             "MINICODER_API_KEY": "not-used",
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
+            "MINICODER_MEMORY_ENABLED": "false",
         },
         stdout=stdout,
         stderr=stderr,
@@ -377,6 +388,7 @@ def test_cli_renders_model_markdown_instead_of_printing_fence_markers(
             "MINICODER_API_KEY": "not-used",
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
+            "MINICODER_MEMORY_ENABLED": "false",
         },
         stdout=stdout,
         stderr=StringIO(),

@@ -21,6 +21,7 @@ def test_agent_jsonl_trace_excludes_message_and_tool_bodies(tmp_path: Path) -> N
             "MINICODER_API_KEY": api_key_marker,
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
+            "MINICODER_MEMORY_ENABLED": "false",
         },
         workspace=tmp_path,
         platform_name="darwin",
@@ -78,7 +79,7 @@ def test_agent_jsonl_trace_excludes_message_and_tool_bodies(tmp_path: Path) -> N
     ):
         assert forbidden not in trace_text
     records = [json.loads(line) for line in trace_text.splitlines()]
-    assert [record["sequence"] for record in records] == list(range(1, 17))
+    assert [record["sequence"] for record in records] == list(range(1, 19))
     assert [record["type"] for record in records] == [
         "task_started",
         "planning_started",
@@ -89,11 +90,13 @@ def test_agent_jsonl_trace_excludes_message_and_tool_bodies(tmp_path: Path) -> N
         "tool_called",
         "tool_finished",
         "model_requested",
+        "plan_step_completed",
         "plan_step_started",
         "tool_called",
         "tool_finished",
         "verification_passed",
         "model_requested",
+        "plan_step_completed",
         "plan_completed",
         "task_completed",
     ]

@@ -73,6 +73,7 @@ def test_agent_accepts_a_real_compiled_and_executed_cpp_change(
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
             "MINICODER_COMMAND_TIMEOUT_SECONDS": "10",
+            "MINICODER_MEMORY_ENABLED": "false",
         },
         workspace=tmp_path,
     )
@@ -139,6 +140,7 @@ def test_agent_uses_a_startup_configured_project_verifier(tmp_path: Path) -> Non
             "MINICODER_API_KEY": "not-used",
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
+            "MINICODER_MEMORY_ENABLED": "false",
         },
         workspace=tmp_path,
     )

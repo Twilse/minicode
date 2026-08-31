@@ -9,7 +9,7 @@ The project is currently being developed in small, test-backed increments. Do no
 MiniCoder provides a synchronous multi-turn model/tool loop, workspace-scoped
 file tools, cross-platform command execution, bounded diagnostic output,
 context compaction, an explicit plan-before-execution phase,
-verification-before-completion, optional project memory, explicit states, and
+verification-before-completion, project memory, explicit states, and
 sanitized Observer events for the console and optional JSONL traces.
 
 Configure any OpenAI-compatible Chat Completions endpoint with tool calling:
@@ -51,6 +51,20 @@ final response bodies, and model reasoning content.
 Each new interactive user turn receives a fresh model-step allowance while prior
 messages and completion evidence remain available to the session.
 
+## Context budget
+
+MiniCoder uses an approximate character budget to keep conversation history
+below the configured model's context window. The default is 180,000 characters,
+three times the previous default, and older tool-heavy history is compacted only
+after that threshold is reached. This value is deliberately provider-neutral:
+it is not a token count or a claim about every compatible model's maximum.
+
+Override it when the selected endpoint has a smaller or larger context window:
+
+```bash
+export MINICODER_CONTEXT_BUDGET_CHARS=300000
+```
+
 ## Planning before execution
 
 Planning is enabled by default. At the start of every user turn, the first model
@@ -61,8 +75,10 @@ results, errors, or safety rules provide a concrete reason to adapt it. The plan
 remains in normal conversation history and its model request counts toward
 `MINICODER_MAX_STEPS`.
 
-The console prints the bounded plan items, identifies the current item while work
-is in progress, and reports when all items complete. Compatible models may attach
+The console prints the bounded plan items and emits an ordered “started” and
+“completed” status for every item. Even if a model directly associates a tool
+with a later plan item, MiniCoder closes and displays each intermediate item in
+sequence instead of jumping over its number. Compatible models may attach
 `[plan_step=N]` to a tool-calling response for an exact association. When a
 provider omits tool-call content, MiniCoder falls back to a deterministic mapping
 from read/search, create/replace, and command tools to inspection,
@@ -75,12 +91,13 @@ two-phase interaction well:
 export MINICODER_PLANNING_ENABLED=false
 ```
 
-## Optional project memory
+## Project memory
 
-Project memory is disabled by default and must be enabled explicitly:
+Project memory is enabled by default. Disable it for a sensitive workspace or
+when the extra summary-model request is not wanted:
 
 ```bash
-export MINICODER_MEMORY_ENABLED=true
+export MINICODER_MEMORY_ENABLED=false
 ```
 
 After each successfully completed user turn, MiniCoder makes one additional
@@ -99,10 +116,10 @@ successful task into a failed one. That fallback contains bounded excerpts from
 the request and answer rather than a model-written abstraction. Failed tasks are
 not remembered.
 
-Enabling memory therefore adds one model request per successful turn and stores
+Memory therefore adds one model request per successful turn and stores
 derived project information locally. Other secrets contained in a request or
 answer cannot be identified with certainty, so review this tradeoff before
-enabling it. The workspace path is the project identity: moving the project
+using the default. The workspace path is the project identity: moving the project
 starts a different memory file. The current lightweight store intentionally has
 no automatic rotation, cross-process file locking, or `/forget` command.
 

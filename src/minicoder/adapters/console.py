@@ -109,6 +109,11 @@ def _format_event(event: AgentEvent) -> str | None:
         count = int(details["plan_item_count"])
         step = str(details.get("display_plan_step", "当前步骤"))
         return f"[进行中] {index}/{count} {step}"
+    if event.kind is AgentEventKind.PLAN_STEP_COMPLETED:
+        index = int(details["plan_step"])
+        count = int(details["plan_item_count"])
+        step = str(details.get("display_plan_step", "当前步骤"))
+        return f"[已完成] {index}/{count} {step}"
     if event.kind is AgentEventKind.PLAN_COMPLETED:
         count = int(details["plan_item_count"])
         return f"[计划] 全部 {count} 项已完成"

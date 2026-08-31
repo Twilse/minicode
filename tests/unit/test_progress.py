@@ -41,11 +41,19 @@ def test_plan_progress_parses_items_and_infers_tool_stages() -> None:
         "实现所需修改",
         "运行测试并验证结果",
     )
-    assert first.index == 1
-    assert inspection is None
-    assert mutation is not None and mutation.index == 2
-    assert verification is not None and verification.index == 3
-    assert progress.finish() is None
+    assert first.step.index == 1 and first.completed is False
+    assert inspection == ()
+    assert [(update.step.index, update.completed) for update in mutation] == [
+        (1, True),
+        (2, False),
+    ]
+    assert [(update.step.index, update.completed) for update in verification] == [
+        (2, True),
+        (3, False),
+    ]
+    assert [
+        (update.step.index, update.completed) for update in progress.finish()
+    ] == [(3, True)]
 
 
 def test_explicit_plan_step_marker_takes_priority_over_tool_inference() -> None:
@@ -54,14 +62,35 @@ def test_explicit_plan_step_marker_takes_priority_over_tool_inference() -> None:
     )
     progress.begin()
 
-    selected = progress.advance_for_tool(
+    updates = progress.advance_for_tool(
         _call("read_file", {"path": "app.py"}),
         assistant_content="[plan_step=2] Continuing the implementation.",
     )
 
-    assert selected is not None
-    assert selected.index == 2
-    assert selected.text == "Implement changes."
+    assert updates[-1].step.index == 2
+    assert updates[-1].step.text == "Implement changes."
+    assert updates[-1].completed is False
+
+
+def test_plan_progress_emits_every_intermediate_item_in_order() -> None:
+    progress = PlanProgress.from_model_text(
+        "1. Inspect.\n2. Design.\n3. Implement.\n4. Verify."
+    )
+    progress.begin()
+
+    updates = progress.advance_for_tool(
+        _call("run_command", {"argv": ["python", "-m", "pytest"]}),
+        assistant_content="[plan_step=4] Running verification.",
+    )
+
+    assert [(update.step.index, update.completed) for update in updates] == [
+        (1, True),
+        (2, False),
+        (2, True),
+        (3, False),
+        (3, True),
+        (4, False),
+    ]
 
 
 def test_tool_display_details_expose_targets_without_file_bodies() -> None:

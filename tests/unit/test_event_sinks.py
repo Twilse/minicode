@@ -209,6 +209,15 @@ def test_console_sink_renders_planning_and_memory_as_optional_progress() -> None
         },
     )
     bus.publish(
+        AgentEventKind.PLAN_STEP_COMPLETED,
+        model_step=2,
+        details={
+            "plan_step": 1,
+            "plan_item_count": 2,
+            "display_plan_step": "检查项目",
+        },
+    )
+    bus.publish(
         AgentEventKind.PLAN_COMPLETED,
         model_step=2,
         details={"plan_item_count": 2},
@@ -233,6 +242,7 @@ def test_console_sink_renders_planning_and_memory_as_optional_progress() -> None
         "  1. 检查项目",
         "  2. 输出结果",
         "[进行中] 1/2 检查项目",
+        "[已完成] 1/2 检查项目",
         "[计划] 全部 2 项已完成",
         "[记忆] 已加载这个项目最近的 3 条记录",
         "[记忆] 正在整理本轮可供以后参考的项目摘要…",

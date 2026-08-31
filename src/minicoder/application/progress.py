@@ -139,6 +139,14 @@ class PlanStep:
     text: str  # Bounded plan item text.
 
 
+@dataclass(frozen=True, slots=True)
+class PlanStepUpdate:
+    """One ordered plan-step status change emitted to observers."""
+
+    step: PlanStep  # Plan item whose status changed.
+    completed: bool  # False when starting; True when finishing the item.
+
+
 @dataclass(slots=True)
 class PlanProgress:
     """Track the currently displayed item of one model-generated plan."""
@@ -178,25 +186,23 @@ class PlanProgress:
             for index, item in enumerate(self.items, start=1)
         )
 
-    def begin(self) -> PlanStep:
+    def begin(self) -> PlanStepUpdate:
         """Start the first plan item after planning completes."""
 
-        step = self._activate(1, always=True)
-        if step is None:  # Defensive: always=True must create a display event.
-            raise DomainValidationError("plan could not start its first item")
-        return step
+        self.current_index = 1
+        return PlanStepUpdate(step=self._step(1), completed=False)
 
     def advance_for_tool(
         self,
         call: ToolCall,
         *,
         assistant_content: str | None,
-    ) -> PlanStep | None:
+    ) -> tuple[PlanStepUpdate, ...]:
         """Select a plan item from an explicit marker or a deterministic fallback."""
 
         explicit = _explicit_step(assistant_content, total=self.total)
         if explicit is not None:
-            return self._activate(explicit)
+            return self._transition_to(explicit)
 
         keywords = _keywords_for_tool(call)
         inferred = _matching_step(
@@ -206,17 +212,45 @@ class PlanProgress:
         )
         if inferred is None:
             inferred = max(self.current_index, 1)
-        return self._activate(inferred)
+        return self._transition_to(inferred)
 
-    def finish(self) -> PlanStep | None:
-        """Select the final item before reporting that the whole plan completed."""
+    def finish(self) -> tuple[PlanStepUpdate, ...]:
+        """Complete every remaining item in order before whole-plan completion."""
 
-        return self._activate(self.total)
+        updates: list[PlanStepUpdate] = []
+        if self.current_index == 0:
+            updates.append(self.begin())
+        updates.append(
+            PlanStepUpdate(
+                step=self._step(self.current_index),
+                completed=True,
+            )
+        )
+        for index in range(self.current_index + 1, self.total + 1):
+            step = self._step(index)
+            updates.append(PlanStepUpdate(step=step, completed=False))
+            updates.append(PlanStepUpdate(step=step, completed=True))
+        self.current_index = self.total
+        return tuple(updates)
 
-    def _activate(self, index: int, *, always: bool = False) -> PlanStep | None:
-        if not always and index == self.current_index:
-            return None
+    def _transition_to(self, index: int) -> tuple[PlanStepUpdate, ...]:
+        if index <= self.current_index:
+            return ()
+        updates: list[PlanStepUpdate] = [
+            PlanStepUpdate(
+                step=self._step(self.current_index),
+                completed=True,
+            )
+        ]
+        for intermediate in range(self.current_index + 1, index):
+            step = self._step(intermediate)
+            updates.append(PlanStepUpdate(step=step, completed=False))
+            updates.append(PlanStepUpdate(step=step, completed=True))
         self.current_index = index
+        updates.append(PlanStepUpdate(step=self._step(index), completed=False))
+        return tuple(updates)
+
+    def _step(self, index: int) -> PlanStep:
         return PlanStep(index=index, total=self.total, text=self.items[index - 1])
 
 

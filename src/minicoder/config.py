@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from minicoder.domain.errors import ConfigurationError
 
 _MIN_TOOL_OUTPUT_CHARS = 512
+_DEFAULT_CONTEXT_BUDGET_CHARS = 180_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,12 +103,12 @@ class AppConfig:
             context_budget_chars=_positive_int(
                 source,
                 "MINICODER_CONTEXT_BUDGET_CHARS",
-                60_000,
+                _DEFAULT_CONTEXT_BUDGET_CHARS,
             ),
             memory_enabled=_boolean(
                 source,
                 "MINICODER_MEMORY_ENABLED",
-                False,
+                True,
             ),
             planning_enabled=_boolean(
                 source,

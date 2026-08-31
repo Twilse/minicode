@@ -27,7 +27,8 @@ def test_from_environment_loads_required_model_settings_and_safe_defaults(
     assert config.max_steps == 20
     assert config.model_timeout_seconds == 60.0
     assert config.command_timeout_seconds == 30.0
-    assert config.memory_enabled is False
+    assert config.context_budget_chars == 180_000
+    assert config.memory_enabled is True
     assert config.planning_enabled is True
 
 
@@ -42,7 +43,7 @@ def test_from_environment_accepts_explicit_overrides(tmp_path: Path) -> None:
             "MINICODER_COMMAND_TIMEOUT_SECONDS": "2.5",
             "MINICODER_MAX_TOOL_OUTPUT_CHARS": "800",
             "MINICODER_CONTEXT_BUDGET_CHARS": "9000",
-            "MINICODER_MEMORY_ENABLED": "yes",
+            "MINICODER_MEMORY_ENABLED": "no",
             "MINICODER_PLANNING_ENABLED": "off",
         },
         workspace=tmp_path,
@@ -55,7 +56,7 @@ def test_from_environment_accepts_explicit_overrides(tmp_path: Path) -> None:
     assert config.command_timeout_seconds == 2.5
     assert config.max_tool_output_chars == 800
     assert config.context_budget_chars == 9000
-    assert config.memory_enabled is True
+    assert config.memory_enabled is False
     assert config.planning_enabled is False
 
 

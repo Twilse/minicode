@@ -14,7 +14,7 @@ from minicoder.application.event_bus import EventBus
 from minicoder.application.ports import ModelPort, ToolPort
 from minicoder.application.progress import (
     PlanProgress,
-    PlanStep,
+    PlanStepUpdate,
     tool_display_details,
 )
 from minicoder.application.retry import (
@@ -316,7 +316,7 @@ class AgentEngine:
                         "display_plan": plan_progress.display_text,
                     },
                 )
-                self._record_plan_step(
+                self._record_plan_update(
                     plan_progress.begin(),
                     model_step=state.model_steps,
                 )
@@ -327,13 +327,13 @@ class AgentEngine:
                 state.begin_tool_execution()
                 for call in turn.tool_calls:
                     if plan_progress is not None:
-                        plan_step = plan_progress.advance_for_tool(
+                        plan_updates = plan_progress.advance_for_tool(
                             call,
                             assistant_content=turn.content,
                         )
-                        if plan_step is not None:
-                            self._record_plan_step(
-                                plan_step,
+                        for update in plan_updates:
+                            self._record_plan_update(
+                                update,
                                 model_step=state.model_steps,
                             )
                     self._events.publish(
@@ -422,10 +422,9 @@ class AgentEngine:
 
             state.complete()
             if plan_progress is not None:
-                final_step = plan_progress.finish()
-                if final_step is not None:
-                    self._record_plan_step(
-                        final_step,
+                for update in plan_progress.finish():
+                    self._record_plan_update(
+                        update,
                         model_step=state.model_steps,
                     )
                 self._events.publish(
@@ -506,9 +505,20 @@ class AgentEngine:
             details={"verification_kind": observation.kind},
         )
 
-    def _record_plan_step(self, step: PlanStep, *, model_step: int) -> None:
+    def _record_plan_update(
+        self,
+        update: PlanStepUpdate,
+        *,
+        model_step: int,
+    ) -> None:
+        kind = (
+            AgentEventKind.PLAN_STEP_COMPLETED
+            if update.completed
+            else AgentEventKind.PLAN_STEP_STARTED
+        )
+        step = update.step
         self._events.publish(
-            AgentEventKind.PLAN_STEP_STARTED,
+            kind,
             model_step=model_step,
             details={
                 "plan_step": step.index,

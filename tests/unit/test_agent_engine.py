@@ -120,7 +120,11 @@ def test_engine_plans_without_tools_before_following_the_plan() -> None:
         AgentEventKind.TOOL_CALLED,
         AgentEventKind.TOOL_FINISHED,
         AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.PLAN_STEP_COMPLETED,
         AgentEventKind.PLAN_STEP_STARTED,
+        AgentEventKind.PLAN_STEP_COMPLETED,
+        AgentEventKind.PLAN_STEP_STARTED,
+        AgentEventKind.PLAN_STEP_COMPLETED,
         AgentEventKind.PLAN_COMPLETED,
         AgentEventKind.TASK_COMPLETED,
     ]
@@ -129,7 +133,16 @@ def test_engine_plans_without_tools_before_following_the_plan() -> None:
     assert observed.events[3].details["display_plan"] == plan
     assert observed.events[4].details["plan_step"] == 1
     assert observed.events[5].details["request_kind"] == "execution"
-    assert observed.events[9].details["plan_step"] == 3
+    assert [
+        (event.details["plan_step"], event.kind)
+        for event in observed.events[9:14]
+    ] == [
+        (1, AgentEventKind.PLAN_STEP_COMPLETED),
+        (2, AgentEventKind.PLAN_STEP_STARTED),
+        (2, AgentEventKind.PLAN_STEP_COMPLETED),
+        (3, AgentEventKind.PLAN_STEP_STARTED),
+        (3, AgentEventKind.PLAN_STEP_COMPLETED),
+    ]
 
 
 def test_engine_counts_planning_against_the_model_step_limit() -> None:

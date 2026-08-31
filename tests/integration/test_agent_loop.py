@@ -15,6 +15,7 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
             "MINICODER_MAX_STEPS": "4",
+            "MINICODER_MEMORY_ENABLED": "false",
         },
         workspace=tmp_path,
         platform_name="darwin",
@@ -78,17 +79,19 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
         AgentEventKind.TOOL_CALLED,
         AgentEventKind.TOOL_FINISHED,
         AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.PLAN_STEP_COMPLETED,
         AgentEventKind.PLAN_STEP_STARTED,
         AgentEventKind.TOOL_CALLED,
         AgentEventKind.TOOL_FINISHED,
         AgentEventKind.VERIFICATION_PASSED,
         AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.PLAN_STEP_COMPLETED,
         AgentEventKind.PLAN_COMPLETED,
         AgentEventKind.TASK_COMPLETED,
     ]
     assert events.events[6].details["display_path"] == "created_by_agent.py"
     assert (
-        events.events[10].details["display_command"]
+        events.events[11].details["display_command"]
         == "python -m py_compile created_by_agent.py"
     )
 
@@ -102,6 +105,7 @@ def test_factory_session_continues_unverified_work_in_a_second_user_turn(
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
             "MINICODER_MAX_STEPS": "3",
+            "MINICODER_MEMORY_ENABLED": "false",
         },
         workspace=tmp_path,
         platform_name="darwin",

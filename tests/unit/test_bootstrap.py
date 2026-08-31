@@ -208,6 +208,7 @@ def test_factory_creates_one_shot_agent_session_with_injected_adapters(
             "MINICODER_API_KEY": "not-used",
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
+            "MINICODER_MEMORY_ENABLED": "false",
         },
         workspace=tmp_path,
         platform_name="darwin",
