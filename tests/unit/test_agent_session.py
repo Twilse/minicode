@@ -6,7 +6,7 @@ from minicoder.application.agent_engine import AgentEngine
 from minicoder.application.event_bus import EventBus
 from minicoder.domain.errors import MemoryPersistenceError, ModelConnectionError
 from minicoder.domain.events import AgentEvent, AgentEventKind
-from minicoder.domain.memory import ProjectMemoryRecord
+from minicoder.domain.memory import ProjectMemoryRecord, TurnMaintenanceDecision
 from minicoder.bootstrap import AgentSession
 from minicoder.domain.models import AssistantTurn
 from minicoder.domain.state import AgentPhase
@@ -143,15 +143,22 @@ def test_session_keeps_completed_result_when_memory_append_fails(
         def append(self, record: ProjectMemoryRecord) -> None:
             raise MemoryPersistenceError("disk unavailable")
 
-    class StaticSummarizer:
-        def summarize(
+    class StaticMaintainer:
+        def maintain(
             self,
             *,
             task: str,
-            outcome: str,
+            result: object,
+            turn_messages: object,
+            previous_context: str | None,
             model_step: int,
-        ) -> str:
-            return "Completed the requested work."
+            project_memory: object = (),
+            turn_index: int = 1,
+        ) -> TurnMaintenanceDecision:
+            return TurnMaintenanceDecision(
+                context_summary="Completed the requested work.",
+                memory_summary="Durable completed work.",
+            )
 
     artifacts = ToolOutputArtifactStore(
         max_read_chars=100,
@@ -170,7 +177,7 @@ def test_session_keeps_completed_result_when_memory_append_fails(
         artifacts=artifacts,
         events=events,
         memory_store=FailingMemoryStore(),
-        memory_summarizer=StaticSummarizer(),
+        memory_maintainer=StaticMaintainer(),
     )
 
     result = session.run("Complete even if memory cannot be saved")
@@ -180,21 +187,32 @@ def test_session_keeps_completed_result_when_memory_append_fails(
     assert observed.events[-1].details["operation"] == "append"
 
 
-def test_session_does_not_summarize_failed_turn(tmp_path: Path) -> None:
+def test_session_maintains_failed_turn_without_forcing_durable_memory(
+    tmp_path: Path,
+) -> None:
     class FailingModel:
         def complete(self, **_: object) -> AssistantTurn:
             raise ModelConnectionError("offline")
 
-    class UnusedMemoryStore:
+    class RecordingMemoryStore:
         def load_recent(self) -> tuple[ProjectMemoryRecord, ...]:
             return ()
 
         def append(self, record: ProjectMemoryRecord) -> None:
-            raise AssertionError("failed turns must not be persisted")
+            raise AssertionError("none decisions must not append durable memory")
 
-    class UnusedSummarizer:
-        def summarize(self, **_: object) -> str:
-            raise AssertionError("failed turns must not be summarized")
+    class RecordingMaintainer:
+        def __init__(self) -> None:
+            self.results: list[object] = []
+
+        def maintain(self, **kwargs: object) -> TurnMaintenanceDecision:
+            self.results.append(kwargs["result"])
+            return TurnMaintenanceDecision(
+                context_summary=(
+                    "The last turn failed because the model service was offline."
+                ),
+                memory_summary=None,
+            )
 
     artifacts = ToolOutputArtifactStore(
         max_read_chars=100,
@@ -207,14 +225,17 @@ def test_session_does_not_summarize_failed_turn(tmp_path: Path) -> None:
         max_steps=2,
         events=events,
     )
+    maintainer = RecordingMaintainer()
     session = AgentSession(
         engine=engine,
         artifacts=artifacts,
         events=events,
-        memory_store=UnusedMemoryStore(),
-        memory_summarizer=UnusedSummarizer(),
+        memory_store=RecordingMemoryStore(),
+        memory_maintainer=maintainer,
     )
 
     result = session.run("This turn will fail")
 
     assert result.phase is AgentPhase.FAILED
+    assert maintainer.results == [result]
+    assert "model service was offline" in session.rolling_context

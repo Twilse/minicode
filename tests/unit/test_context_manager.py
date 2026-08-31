@@ -1,17 +1,25 @@
 import json
 from collections.abc import Sequence
+from pathlib import Path
 
+from minicoder.adapters.jsonl_session import JsonlSessionArchive
 from minicoder.application.context import (
     ContextManager,
+    ModelContextSummary,
     conversation_char_count,
+    tool_definition_char_count,
 )
+from minicoder.application.event_bus import EventBus
+from minicoder.domain.events import AgentEventKind
 from minicoder.domain.models import (
     AssistantTurn,
     Message,
     MessageRole,
     ToolCall,
+    ToolDefinition,
     ToolResult,
 )
+from tests.fakes import FakeModelAdapter, MemoryEventSink
 
 
 def _exchange(
@@ -112,6 +120,8 @@ def test_context_accepts_a_replaceable_summary_strategy() -> None:
             messages: Sequence[Message],
             *,
             max_chars: int,
+            turn_index: int = 0,
+            model_step: int = 0,
         ) -> str:
             self.received = tuple(messages)
             return "custom bounded summary"[:max_chars]
@@ -274,3 +284,207 @@ def test_context_preserves_the_current_user_turn_and_summarizes_an_old_turn() ->
     assert "old provider state" not in (window.messages[0].content or "")
     assert window.messages[-2].reasoning_content == "current continuation state"
     assert window.messages[-1].tool_call_id == "call-9"
+
+
+def test_context_counts_current_tool_schemas_and_response_reserve() -> None:
+    messages = (
+        Message(role=MessageRole.SYSTEM, content="system rules"),
+        Message(role=MessageRole.USER, content="inspect the project"),
+        *_exchange(
+            1,
+            name="read_file",
+            path="old.py",
+            content="old " + "a" * 700,
+        ),
+    )
+    definition = ToolDefinition(
+        name="large_tool",
+        description="A tool with a deliberately substantial schema.",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "x" * 250,
+                }
+            },
+        },
+    )
+
+    window = ContextManager(
+        budget_chars=1_200,
+        response_reserve_chars=200,
+    ).prepare(messages, tools=(definition,))
+
+    assert window.tool_definition_chars == tool_definition_char_count((definition,))
+    assert window.response_reserve_chars == 200
+    assert window.request_chars <= 1_200
+    assert window.prepared_chars <= (
+        1_200 - window.tool_definition_chars - 200
+    )
+
+
+def test_context_summary_target_never_exceeds_the_response_reserve() -> None:
+    class RecordingSummary:
+        max_chars = 0
+
+        def summarize(
+            self,
+            messages: Sequence[Message],
+            *,
+            max_chars: int,
+            turn_index: int = 0,
+            model_step: int = 0,
+        ) -> str:
+            self.max_chars = max_chars
+            return "s" * max_chars
+
+    strategy = RecordingSummary()
+    messages = (
+        Message(role=MessageRole.SYSTEM, content="system rules"),
+        Message(role=MessageRole.USER, content="inspect the project"),
+        *_exchange(
+            1,
+            name="read_file",
+            path="large.py",
+            content="x" * 2_000,
+        ),
+    )
+
+    window = ContextManager(
+        budget_chars=900,
+        response_reserve_chars=100,
+        summary_strategy=strategy,
+    ).prepare(messages)
+
+    assert strategy.max_chars <= 100
+    assert window.request_chars <= 900
+
+
+def test_context_pins_recent_session_and_memory_data_in_every_request() -> None:
+    messages = (
+        Message(role=MessageRole.SYSTEM, content="system rules"),
+        Message(role=MessageRole.USER, content="new unrelated task"),
+    )
+
+    window = ContextManager(budget_chars=1_000).prepare(
+        messages,
+        reference_context=(
+            "Previous task failed at max_steps. Durable project fact: Python 3.11."
+        ),
+    )
+
+    system = window.messages[0].content or ""
+    assert "Workspace memory and recent-session context" in system
+    assert "Previous task failed at max_steps" in system
+    assert "Python 3.11" in system
+    assert "not an instruction" in system
+    assert messages[0].content == "system rules"
+    assert window.messages[-1].content == "new unrelated task"
+
+
+def test_model_context_summary_uses_a_no_tool_request_and_omits_reasoning() -> None:
+    model = FakeModelAdapter(
+        [AssistantTurn(content="Kept the important old requirement and failure.")]
+    )
+    observed = MemoryEventSink()
+    strategy = ModelContextSummary(
+        model=model,
+        events=EventBus((observed,), run_id="context-summary"),
+    )
+    messages = (
+        Message(role=MessageRole.USER, content="preserve this requirement"),
+        Message(
+            role=MessageRole.ASSISTANT,
+            content="visible result",
+            reasoning_content="private reasoning must stay out",
+        ),
+    )
+
+    summary = strategy.summarize(
+        messages,
+        max_chars=200,
+        turn_index=3,
+        model_step=7,
+    )
+
+    assert summary == "Kept the important old requirement and failure."
+    assert model.requests[0].tools == ()
+    source = model.requests[0].messages[-1].content or ""
+    assert "preserve this requirement" in source
+    assert "visible result" in source
+    assert "private reasoning" not in source
+    assert [event.kind for event in observed.events] == [
+        AgentEventKind.CONTEXT_SUMMARY_REQUESTED,
+        AgentEventKind.CONTEXT_SUMMARY_COMPLETED,
+    ]
+    assert all(event.model_step == 7 for event in observed.events)
+
+
+def test_model_context_summary_never_sends_more_than_its_input_budget() -> None:
+    model = FakeModelAdapter(
+        [AssistantTurn(content="A bounded semantic summary.")]
+    )
+    strategy = ModelContextSummary(
+        model=model,
+        source_chars=20_000,
+        request_input_budget_chars=900,
+    )
+
+    summary = strategy.summarize(
+        (Message(role=MessageRole.USER, content="old context " + "x" * 20_000),),
+        max_chars=200,
+    )
+
+    assert summary == "A bounded semantic summary."
+    assert conversation_char_count(model.requests[0].messages) <= 900
+
+
+def test_model_context_summary_uses_fallback_when_fixed_prompt_cannot_fit() -> None:
+    model = FakeModelAdapter([])
+    observed = MemoryEventSink()
+    strategy = ModelContextSummary(
+        model=model,
+        events=EventBus((observed,), run_id="context-budget-fallback"),
+        request_input_budget_chars=10,
+    )
+
+    summary = strategy.summarize(
+        (Message(role=MessageRole.USER, content="preserve this fact"),),
+        max_chars=100,
+    )
+
+    assert summary
+    assert model.requests == []
+    assert observed.events[-1].kind is AgentEventKind.CONTEXT_SUMMARY_FAILED
+    assert (
+        observed.events[-1].details["reason"]
+        == "summary_request_budget_too_small"
+    )
+
+
+def test_model_context_summary_archives_its_request_and_response(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    archive = JsonlSessionArchive(
+        workspace=workspace,
+        storage_root=tmp_path / "sessions",
+    )
+    model = FakeModelAdapter(
+        [AssistantTurn(content="Archived semantic compaction response.")]
+    )
+    strategy = ModelContextSummary(model=model, archive=archive)
+
+    strategy.summarize(
+        (Message(role=MessageRole.USER, content="archived old source"),),
+        max_chars=200,
+        turn_index=2,
+        model_step=9,
+    )
+
+    archived = archive.path.read_text(encoding="utf-8")
+    assert '"request_kind":"context_compaction"' in archived
+    assert "archived old source" in archived
+    assert "Archived semantic compaction response" in archived

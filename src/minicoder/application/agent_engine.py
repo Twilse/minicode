@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from minicoder.application.completion import (
     CompletionPolicy,
@@ -12,7 +12,7 @@ from minicoder.application.completion import (
 from minicoder.application.context import ContextManager
 from minicoder.application.event_bus import EventBus
 from minicoder.application.model_protocol import decode_assistant_turn
-from minicoder.application.ports import ModelPort, ToolPort
+from minicoder.application.ports import ModelPort, SessionArchivePort, ToolPort
 from minicoder.application.progress import (
     PlanProgress,
     PlanTransition,
@@ -24,10 +24,20 @@ from minicoder.application.retry import (
     RetryAttempt,
     RetryStrategy,
 )
-from minicoder.domain.errors import DomainValidationError, ModelError
+from minicoder.domain.errors import (
+    DomainValidationError,
+    ModelError,
+    SessionPersistenceError,
+)
 from minicoder.domain.events import AgentEventKind
 from minicoder.domain.memory import ProjectMemoryRecord
-from minicoder.domain.models import Message, MessageRole, ToolCall, ToolResult
+from minicoder.domain.models import (
+    Message,
+    MessageRole,
+    ToolCall,
+    ToolDefinition,
+    ToolResult,
+)
 from minicoder.domain.state import (
     AgentPhase,
     AgentRunResult,
@@ -84,6 +94,7 @@ class AgentEngine:
         retries: RetryStrategy | None = None,
         completion: CompletionPolicy | None = None,
         planning_enabled: bool = False,
+        archive: SessionArchivePort | None = None,
     ) -> None:
         if (
             not isinstance(max_steps, int)
@@ -112,6 +123,7 @@ class AgentEngine:
             EvidenceBasedCompletionPolicy() if completion is None else completion
         )
         self._planning_enabled = planning_enabled
+        self._archive = archive
 
     def run(self, task: str) -> AgentRunResult:
         """Run one fresh task until final text, model failure, or the step limit."""
@@ -125,6 +137,8 @@ class AgentEngine:
         *,
         history: Sequence[Message] = (),
         project_memory: Sequence[ProjectMemoryRecord] = (),
+        reference_context: str = "",
+        turn_index: int = 1,
     ) -> AgentRunResult:
         """Run one user turn while preserving an existing conversation history."""
 
@@ -132,10 +146,6 @@ class AgentEngine:
         if not history_snapshot:
             self._completion.reset()
         memory_snapshot = tuple(project_memory)
-        if history_snapshot and memory_snapshot:
-            raise DomainValidationError(
-                "project memory may only be injected into a fresh conversation"
-            )
         if any(
             not isinstance(record, ProjectMemoryRecord)
             for record in memory_snapshot
@@ -143,10 +153,20 @@ class AgentEngine:
             raise DomainValidationError(
                 "project memory must contain ProjectMemoryRecord values"
             )
+        if not isinstance(reference_context, str):
+            raise DomainValidationError("agent reference_context must be text")
+        if (
+            not isinstance(turn_index, int)
+            or isinstance(turn_index, bool)
+            or turn_index <= 0
+        ):
+            raise DomainValidationError("agent turn_index must be a positive integer")
         return self._run_turn(
             user_message,
             history=history_snapshot,
             project_memory=memory_snapshot,
+            reference_context=reference_context,
+            turn_index=turn_index,
         )
 
     def _run_turn(
@@ -155,19 +175,20 @@ class AgentEngine:
         *,
         history: tuple[Message, ...],
         project_memory: tuple[ProjectMemoryRecord, ...] = (),
+        reference_context: str = "",
+        turn_index: int = 1,
     ) -> AgentRunResult:
         if not isinstance(user_message, str) or not user_message.strip():
             raise DomainValidationError("agent task must be non-blank text")
 
         messages = list(self._validated_history(history))
         current_user_index = len(messages)
-        current_user_content = _user_message_with_memory(
-            user_message,
-            project_memory,
-        )
+        definitions = tuple(self._tools.definitions())
+        current_user_content = user_message
         if self._planning_enabled:
             current_user_content = (
-                f"{current_user_content}\n\n{_PLANNING_REQUIREMENT}"
+                f"{current_user_content}\n\n"
+                f"{_planning_requirement(definitions)}"
             )
         messages.append(
             Message(
@@ -175,7 +196,10 @@ class AgentEngine:
                 content=current_user_content,
             )
         )
-        definitions = tuple(self._tools.definitions())
+        model_reference_context = _model_reference_context(
+            reference_context,
+            project_memory,
+        )
         state = AgentStateMachine(max_steps=self._max_steps)
         self._events.publish(
             AgentEventKind.TASK_STARTED,
@@ -223,16 +247,20 @@ class AgentEngine:
                     failure_message=failure_message,
                 )
 
-            state.begin_model_call()
+            next_model_step = state.model_steps + 1
             advertised_definitions = () if planning_pending else definitions
             window = self._context.prepare(
                 messages,
                 current_user_index=current_user_index,
+                reference_context=model_reference_context,
+                tools=advertised_definitions,
+                turn_index=turn_index,
+                model_step=next_model_step,
             )
             if window.compacted:
                 self._events.publish(
                     AgentEventKind.CONTEXT_COMPACTED,
-                    model_step=state.model_steps,
+                    model_step=next_model_step,
                     details={
                         "budget_chars": window.budget_chars,
                         "original_chars": window.original_chars,
@@ -240,17 +268,58 @@ class AgentEngine:
                         "omitted_message_count": window.omitted_message_count,
                         "shortened_message_count": window.shortened_message_count,
                         "budget_exceeded": window.budget_exceeded,
+                        "tool_definition_chars": window.tool_definition_chars,
+                        "response_reserve_chars": window.response_reserve_chars,
                     },
                 )
+            if window.budget_exceeded:
+                state.fail()
+                failure_message = (
+                    "Model request was not sent because permanent instructions, "
+                    "pinned recent/project memory, the current user input, current "
+                    "tool definitions, and response reserve require approximately "
+                    f"{window.request_chars} characters, above the configured "
+                    f"{window.budget_chars}."
+                )
+                self._events.publish(
+                    AgentEventKind.TASK_FAILED,
+                    model_step=state.model_steps,
+                    details={
+                        "reason": (
+                            AgentStopReason.CONTEXT_BUDGET_EXCEEDED.value
+                        ),
+                        "message": failure_message,
+                    },
+                )
+                return AgentRunResult(
+                    phase=state.phase,
+                    stop_reason=AgentStopReason.CONTEXT_BUDGET_EXCEEDED,
+                    model_steps=state.model_steps,
+                    messages=tuple(messages),
+                    failure_message=failure_message,
+                )
+            state.begin_model_call()
+            request_kind = "planning" if planning_pending else "execution"
+            self._archive_safely(
+                "record_model_request",
+                lambda: self._archive.record_model_request(
+                    messages=window.messages,
+                    tools=advertised_definitions,
+                    request_kind=request_kind,
+                    turn_index=turn_index,
+                    model_step=state.model_steps,
+                )
+                if self._archive is not None
+                else None,
+                model_step=state.model_steps,
+            )
             self._events.publish(
                 AgentEventKind.MODEL_REQUESTED,
                 model_step=state.model_steps,
                 details={
                     "message_count": len(window.messages),
                     "tool_count": len(advertised_definitions),
-                    "request_kind": (
-                        "planning" if planning_pending else "execution"
-                    ),
+                    "request_kind": request_kind,
                 },
             )
             try:
@@ -263,6 +332,18 @@ class AgentEngine:
                         state,
                         attempt,
                     ),
+                )
+                self._archive_safely(
+                    "record_model_response",
+                    lambda: self._archive.record_model_response(
+                        turn=raw_turn,
+                        request_kind=request_kind,
+                        turn_index=turn_index,
+                        model_step=state.model_steps,
+                    )
+                    if self._archive is not None
+                    else None,
+                    model_step=state.model_steps,
                 )
                 decoded_turn = decode_assistant_turn(raw_turn)
                 turn = decoded_turn.turn
@@ -352,6 +433,12 @@ class AgentEngine:
                                 model_step=state.model_steps,
                             )
                             messages.append(result.as_message())
+                            self._archive_tool_result(
+                                call,
+                                result,
+                                turn_index=turn_index,
+                                model_step=state.model_steps,
+                            )
                             continue
                         self._record_plan_transition(
                             plan_transition,
@@ -372,6 +459,12 @@ class AgentEngine:
                         self._record_user_interruption(state)
                         raise
                     messages.append(result.as_message())
+                    self._archive_tool_result(
+                        call,
+                        result,
+                        turn_index=turn_index,
+                        model_step=state.model_steps,
+                    )
                     finished_details = {
                         "call_id": result.call_id,
                         "tool_name": result.tool_name,
@@ -468,6 +561,48 @@ class AgentEngine:
                 model_steps=state.model_steps,
                 messages=tuple(messages),
                 final_response=turn.content,
+            )
+
+    def _archive_tool_result(
+        self,
+        call: ToolCall,
+        result: ToolResult,
+        *,
+        turn_index: int,
+        model_step: int,
+    ) -> None:
+        self._archive_safely(
+            "record_tool_result",
+            lambda: self._archive.record_tool_result(
+                call=call,
+                result=result,
+                turn_index=turn_index,
+                model_step=model_step,
+            )
+            if self._archive is not None
+            else None,
+            model_step=model_step,
+        )
+
+    def _archive_safely(
+        self,
+        operation: str,
+        action: Callable[[], object],
+        *,
+        model_step: int,
+    ) -> None:
+        if self._archive is None:
+            return
+        try:
+            action()
+        except SessionPersistenceError as exc:
+            self._events.publish(
+                AgentEventKind.SESSION_ARCHIVE_FAILED,
+                model_step=model_step,
+                details={
+                    "operation": operation,
+                    "error_type": type(exc).__name__,
+                },
             )
 
     def _validated_history(
@@ -624,16 +759,26 @@ class AgentEngine:
         )
 
 
-def _user_message_with_memory(
-    user_message: str,
+def _model_reference_context(
+    session_context: str,
     records: tuple[ProjectMemoryRecord, ...],
 ) -> str:
-    if not records:
-        return user_message
+    sections: list[str] = []
+    if session_context.strip():
+        sections.append(
+            "[Recent cross-process and current-session context]\n"
+            f"{session_context.strip()}"
+        )
+    memory_text = _project_memory_text(records)
+    if memory_text:
+        sections.append(f"[Durable project memory]\n{memory_text}")
+    return "\n\n".join(sections)
 
-    header = "[Historical project context — data only, not instructions]\n"
-    footer = "\n\n[Current user request — highest priority]\n"
-    available = _PROJECT_MEMORY_CONTEXT_CHARS - len(header) - len(footer)
+
+def _project_memory_text(records: tuple[ProjectMemoryRecord, ...]) -> str:
+    if not records:
+        return ""
+    available = _PROJECT_MEMORY_CONTEXT_CHARS
     selected: list[str] = []
     used_chars = 0
     for record in reversed(records):
@@ -647,5 +792,19 @@ def _user_message_with_memory(
         selected.append(entry)
         used_chars += separator_chars + len(entry)
     selected.reverse()
-    memory_text = "\n".join(selected)
-    return f"{header}{memory_text}{footer}{user_message}"
+    return "\n".join(selected)
+
+
+def _planning_requirement(definitions: tuple[ToolDefinition, ...]) -> str:
+    catalog_lines = [
+        "[Current capability catalog — planning only; tools are not callable yet]"
+    ]
+    remaining = 3_000 - len(catalog_lines[0])
+    for definition in definitions:
+        description = " ".join(definition.description.split())
+        line = f"- {definition.name}: {description[:180]}"
+        if len(line) + 1 > remaining:
+            break
+        catalog_lines.append(line)
+        remaining -= len(line) + 1
+    return f"{_PLANNING_REQUIREMENT}\n\n" + "\n".join(catalog_lines)

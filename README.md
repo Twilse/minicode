@@ -10,7 +10,10 @@ MiniCoder provides a synchronous multi-turn model/tool loop, workspace-scoped
 file tools, cross-platform command execution, bounded diagnostic output,
 context compaction, an explicit plan-before-execution phase,
 verification-before-completion, project memory, explicit states, and
-sanitized Observer events for the console and optional JSONL traces.
+sanitized Observer events for the console and optional JSONL traces. Each
+process also keeps an exact private session archive, restores the latest
+same-workspace context on restart, and uses the configured model for semantic
+context maintenance.
 
 Configure any OpenAI-compatible Chat Completions endpoint with tool calling:
 
@@ -51,9 +54,11 @@ final response bodies, and model reasoning content.
 Each new interactive user turn receives a fresh model-step allowance while prior
 messages and completion evidence remain available to the session.
 
-The default allowance is 40 model requests per user turn. It includes the
-planning request and every model continuation after a tool result. Override it
-for a smaller or larger task budget:
+The default allowance is 40 task-model requests per user turn. It includes the
+planning request and every model continuation after a tool result. The one
+post-turn maintenance request and any model-assisted context-compaction request
+are separate housekeeping calls and do not consume this task loop allowance.
+Override the task allowance for a smaller or larger task budget:
 
 ```bash
 export MINICODER_MAX_STEPS=60
@@ -61,11 +66,11 @@ export MINICODER_MAX_STEPS=60
 
 ## Context budget
 
-MiniCoder uses an approximate character budget to keep conversation history
-below the configured model's context window. The default is 180,000 characters,
-three times the previous default, and older tool-heavy history is compacted only
-after that threshold is reached. This value is deliberately provider-neutral:
-it is not a token count or a claim about every compatible model's maximum.
+MiniCoder uses an approximate character budget to keep each execution request
+below the configured model's context window. The default is 180,000 characters.
+The estimate now includes messages, the current Tool Registry JSON Schemas, and
+space reserved for the next model response. This value remains provider-neutral:
+it is not an exact token count or a claim about every compatible model's maximum.
 
 Override it when the selected endpoint has a smaller or larger context window:
 
@@ -73,12 +78,41 @@ Override it when the selected endpoint has a smaller or larger context window:
 export MINICODER_CONTEXT_BUDGET_CHARS=300000
 ```
 
+The default response reserve is 8,000 characters (or 10% for an explicitly
+small context budget). It can be overridden, but must remain below the total:
+
+```bash
+export MINICODER_CONTEXT_RESPONSE_RESERVE_CHARS=12000
+```
+
+Every completed or failed external user turn is finalized by one no-tool
+maintenance pass that updates a structured rolling session summary. On later task-model
+requests, MiniCoder pins that model-written summary, the latest same-workspace
+session recovery data, and bounded durable project memory alongside the System
+message as quoted data. The current user request and current workspace evidence
+always take priority.
+
+When older raw protocol groups still need to be omitted, production composition
+uses another no-tool model request to summarize those groups semantically. The
+summary preserves requirements, files, tool outcomes, errors, verification and
+pending work while excluding private reasoning. A model failure falls back to
+the deterministic summary strategy. The complete source conversation remains in
+the private session archive either way. If fixed fields alone exceed the budget,
+MiniCoder does not send an oversized request and reports actionable configuration
+guidance. Maintenance and context-compaction calls use the same input-budget
+preflight; if even their fixed prompt cannot fit an unusually small custom
+budget, MiniCoder records a deterministic recovery checkpoint without sending
+that housekeeping request.
+
 ## Planning before execution
 
 Planning is enabled by default. At the start of every user turn, the first model
-request receives no tool definitions and may only return a concise numbered
-action plan. Plan size follows task complexity: a direct answer should use one
-item, read-only inspection two or three, and code changes three to seven.
+request cannot call tools and may only return a concise numbered action plan. It
+receives a bounded capability catalog containing current Registry names and
+descriptions, while the execution requests receive the complete current JSON
+Schemas through the API's separate `tools` field. Plan size follows task
+complexity: a direct answer should use one item, read-only inspection two or
+three, and code changes three to seven.
 MiniCoder then adds an execution instruction and makes the tools available.
 The system prompt tells the model to follow that plan unless file contents, tool
 results, errors, or safety rules provide a concrete reason to adapt it. The plan
@@ -120,7 +154,41 @@ two-phase interaction well:
 export MINICODER_PLANNING_ENABLED=false
 ```
 
-## Project memory
+## Exact sessions and cross-process short-term context
+
+Exact session archiving is enabled by default. Disable it for a workspace whose
+raw requests and responses must never be persisted:
+
+```bash
+export MINICODER_SESSION_ARCHIVE_ENABLED=false
+```
+
+Each MiniCoder process owns one append-only file at
+`~/.minicoder/sessions/<workspace-hash>/<timestamp>-<session-id>.jsonl`. Records include the
+exact external user task, every normalized model request, the current tool
+schemas advertised with that request, every normalized model response, complete
+model-visible ToolResults and host metadata, terminal success or failure, and
+the post-turn maintenance decision. Records are flushed as work proceeds and
+the directory/file modes are restricted to the current operating-system user
+where supported.
+
+The next process started with the same canonical workspace path always loads the
+latest usable session, regardless of whether the new prompt says “continue”. It
+injects the previous task, complete/failed/in-progress state, stop reason,
+model-maintained rolling summary, and a bounded tail of visible messages and
+tool exchanges. This recovered text is explicitly labeled as historical data,
+not as a new instruction. A normal `/exit`, `/quit`, EOF or context-manager close
+adds a session-close record; if the process was interrupted earlier, the next
+startup builds a deterministic recovery checkpoint from the records already
+flushed.
+
+The archive is intentionally exact and may therefore contain source text,
+commands, outputs, model reasoning exposed by a provider, or secrets that were
+present in the conversation. It is separate from the sanitized `--trace` file.
+There is currently no rotation because this design prioritizes complete local
+recoverability; remove or disable archives explicitly for sensitive workspaces.
+
+## Selective project long-term memory
 
 Project memory is enabled by default. Disable it for a sensitive workspace or
 when the extra summary-model request is not wanted:
@@ -129,28 +197,24 @@ when the extra summary-model request is not wanted:
 export MINICODER_MEMORY_ENABLED=false
 ```
 
-After each successfully completed user turn, MiniCoder makes one additional
-no-tool model request to create a bounded semantic summary. A later process
-started with the same canonical workspace path loads up to eight recent
-summaries and supplies them as historical data on the first turn. This memory is
-separate from the optional audit trace and is stored outside the project at
-`~/.minicoder/memory/<workspace-hash>.jsonl`.
+At the end of every successful or failed external turn, the same no-tool
+maintenance request that updates rolling context must return either
+`memory_action=none` or `memory_action=append`. It appends only a stable,
+important, non-duplicate project fact that should survive beyond the latest
+session; transient conversation and ordinary answers remain only in the exact
+archive and rolling context. Model errors produce a deterministic recovery
+summary but never create a guessed durable memory.
 
-Only the original user request and final answer are sent to the configured model
-for summarization; tool output, model reasoning, and the full conversation are
-not included. The configured API key is redacted if it appears in persisted
-text. A summary-model failure uses a deterministic bounded fallback, while a
-memory read or write failure is reported as a warning and never changes a
-successful task into a failed one. That fallback contains bounded excerpts from
-the request and answer rather than a model-written abstraction. Failed tasks are
-not remembered.
+Selected records are redacted for the configured API key, stored outside the
+project at `~/.minicoder/memory/<workspace-hash>.jsonl`, and supplied on every
+task-model request within a bounded section. A memory read or write failure is a
+warning and never changes the task result. Disabling `MINICODER_MEMORY_ENABLED`
+prevents durable appends but does not disable exact session recovery or the
+rolling-context maintenance needed by that feature.
 
-Memory therefore adds one model request per successful turn and stores
-derived project information locally. Other secrets contained in a request or
-answer cannot be identified with certainty, so review this tradeoff before
-using the default. The workspace path is the project identity: moving the project
-starts a different memory file. The current lightweight store intentionally has
-no automatic rotation, cross-process file locking, or `/forget` command.
+The workspace path remains the project identity: moving the project starts new
+session and memory locations. The current stores intentionally have no automatic
+rotation, cross-process file locking, or `/forget` command.
 
 ## Terminal experience
 

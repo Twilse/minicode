@@ -147,17 +147,22 @@ def _format_event(event: AgentEvent) -> str | None:
         return f"[分析] 正在请求模型（第 {event.model_step} 次）"
     if event.kind is AgentEventKind.MEMORY_LOADED:
         count = int(details.get("record_count", 0))
-        return f"[记忆] 已加载这个项目最近的 {count} 条记录"
+        return f"[长期记忆] 已加载这个项目最近的 {count} 条记录"
+    if event.kind is AgentEventKind.SESSION_CONTEXT_LOADED:
+        status = str(details.get("previous_status", "unknown"))
+        return f"[短期记忆] 已恢复同一工作区最近一次会话（状态：{status}）"
     if event.kind is AgentEventKind.MEMORY_SUMMARY_REQUESTED:
-        return "[记忆] 正在整理本轮可供以后参考的项目摘要…"
+        return "[记忆] 正在更新会话摘要并判断是否记录长期记忆…"
     if event.kind is AgentEventKind.MEMORY_SUMMARY_COMPLETED:
         return None
     if event.kind is AgentEventKind.MEMORY_SUMMARY_FAILED:
-        return "[记忆] 模型总结未成功，已改用基础摘要"
+        return "[记忆] 维护模型未成功，已保存基础恢复检查点"
     if event.kind is AgentEventKind.MEMORY_SAVED:
-        return None
+        return "[长期记忆] 已记录一条以后仍有价值的项目信息"
     if event.kind is AgentEventKind.MEMORY_OPERATION_FAILED:
         return "[记忆] 本地记忆文件不可用；本次任务结果不受影响"
+    if event.kind is AgentEventKind.SESSION_ARCHIVE_FAILED:
+        return "[短期记忆] 完整会话档案暂时不可用；本次任务仍继续"
     if event.kind is AgentEventKind.MODEL_RETRY_SCHEDULED:
         return (
             f"[重试] 模型服务暂时不可用，{details['delay_seconds']} 秒后"
@@ -165,6 +170,12 @@ def _format_event(event: AgentEvent) -> str | None:
         )
     if event.kind is AgentEventKind.CONTEXT_COMPACTED:
         return "[上下文] 对话较长，已整理早期内容"
+    if event.kind is AgentEventKind.CONTEXT_SUMMARY_REQUESTED:
+        return "[上下文] 正在让模型压缩较早的对话内容…"
+    if event.kind is AgentEventKind.CONTEXT_SUMMARY_COMPLETED:
+        return None
+    if event.kind is AgentEventKind.CONTEXT_SUMMARY_FAILED:
+        return "[上下文] 模型压缩未成功，已使用基础压缩结果"
     if event.kind is AgentEventKind.COMPLETION_REJECTED:
         return _completion_message(str(details["reason"]))
     if event.kind is AgentEventKind.TOOL_CALLED:
@@ -251,6 +262,8 @@ def _failure_message(reason: str, model_step: int) -> str:
         return "[失败] 模型服务请求失败"
     if reason == "planning_error":
         return "[失败] 模型没有返回可执行的计划"
+    if reason == "context_budget_exceeded":
+        return "[未完成] 当前请求的固定内容已经超过上下文预算"
     if reason == "user_interrupted":
         return "[停止] 用户已中断任务"
     if reason == "verification_unsupported":
@@ -276,6 +289,13 @@ def format_agent_failure(result: AgentRunResult) -> str:
         return (
             "MiniCoder 未完成任务：模型没有返回有效的纯文本计划，"
             "因此没有执行规划阶段请求的工具。请重新尝试。"
+        )
+    if result.stop_reason is AgentStopReason.CONTEXT_BUDGET_EXCEEDED:
+        return (
+            "MiniCoder 未发送模型请求：System、短期/长期记忆、当前输入、"
+            "工具定义和回复预留已经超过上下文预算。请缩短当前输入、"
+            "减少工具，或提高 "
+            "MINICODER_CONTEXT_BUDGET_CHARS。"
         )
     if result.stop_reason is AgentStopReason.VERIFICATION_UNSUPPORTED:
         return (

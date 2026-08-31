@@ -12,6 +12,7 @@ from minicoder.adapters.subprocess_runner import (
 )
 from minicoder.application.completion import EvidenceBasedCompletionPolicy
 from minicoder.application.context import ContextManager
+from minicoder.application.event_bus import EventBus
 from minicoder.application.retry import ExponentialBackoffRetryStrategy
 from minicoder.application.verification import ConfiguredVerificationCommand
 from minicoder.bootstrap import ApplicationFactory
@@ -186,11 +187,16 @@ def test_factory_selects_i09_context_and_retry_strategies(tmp_path: Path) -> Non
         workspace=tmp_path,
     )
 
-    context = ApplicationFactory.create_context_manager(config)
+    context = ApplicationFactory.create_context_manager(
+        config,
+        model=FakeModelAdapter([]),
+        events=EventBus(),
+    )
     retries = ApplicationFactory.create_retry_strategy()
 
     assert isinstance(context, ContextManager)
     assert context.budget_chars == 4321
+    assert context.response_reserve_chars == 512
     assert isinstance(retries, ExponentialBackoffRetryStrategy)
 
 
@@ -209,6 +215,7 @@ def test_factory_creates_one_shot_agent_session_with_injected_adapters(
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
             "MINICODER_MEMORY_ENABLED": "false",
+            "MINICODER_SESSION_ARCHIVE_ENABLED": "false",
         },
         workspace=tmp_path,
         platform_name="darwin",
@@ -248,6 +255,7 @@ def test_factory_keeps_agent_available_when_memory_load_fails(
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
             "MINICODER_MEMORY_ENABLED": "true",
+            "MINICODER_SESSION_ARCHIVE_ENABLED": "false",
         },
         workspace=tmp_path,
         platform_name="darwin",
@@ -257,6 +265,12 @@ def test_factory_keeps_agent_available_when_memory_load_fails(
         [
             AssistantTurn(content="1. Inspect the workspace."),
             AssistantTurn(content="done without memory"),
+            AssistantTurn(
+                content=(
+                    '{"context_summary":"Completed without loaded durable memory.",'
+                    '"memory_action":"none","memory_summary":null}'
+                )
+            ),
         ]
     )
     session = ApplicationFactory.create_agent_session(

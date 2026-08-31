@@ -27,8 +27,10 @@ class AppConfig:
     model_timeout_seconds: float  # Timeout for one model API request in seconds.
     command_timeout_seconds: float  # Per-command execution timeout in seconds.
     max_tool_output_chars: int  # Maximum characters returned by one tool call.
-    context_budget_chars: int  # Approximate character budget for conversation history.
-    memory_enabled: bool  # Whether successful turns create local project memory.
+    context_budget_chars: int  # Approximate total request/response character budget.
+    context_response_reserve_chars: int  # Budget kept free for one model response.
+    memory_enabled: bool  # Whether the model may append durable project memory.
+    session_archive_enabled: bool  # Whether exact sessions and recent context persist.
     planning_enabled: bool  # Whether each user turn starts with a no-tool plan.
 
     def __repr__(self) -> str:
@@ -45,7 +47,10 @@ class AppConfig:
             f"command_timeout_seconds={self.command_timeout_seconds!r}, "
             f"max_tool_output_chars={self.max_tool_output_chars!r}, "
             f"context_budget_chars={self.context_budget_chars!r}, "
+            "context_response_reserve_chars="
+            f"{self.context_response_reserve_chars!r}, "
             f"memory_enabled={self.memory_enabled!r}, "
+            f"session_archive_enabled={self.session_archive_enabled!r}, "
             f"planning_enabled={self.planning_enabled!r}"
             ")"
         )
@@ -78,6 +83,23 @@ class AppConfig:
         if not workspace_path.is_dir():
             raise ConfigurationError(f"workspace is not a directory: {workspace_path}")
 
+        context_budget_chars = _positive_int(
+            source,
+            "MINICODER_CONTEXT_BUDGET_CHARS",
+            _DEFAULT_CONTEXT_BUDGET_CHARS,
+        )
+        context_response_reserve_chars = _int_at_least(
+            source,
+            "MINICODER_CONTEXT_RESPONSE_RESERVE_CHARS",
+            min(8_000, max(512, context_budget_chars // 10)),
+            minimum=512,
+        )
+        if context_response_reserve_chars >= context_budget_chars:
+            raise ConfigurationError(
+                "MINICODER_CONTEXT_RESPONSE_RESERVE_CHARS must be below "
+                "MINICODER_CONTEXT_BUDGET_CHARS"
+            )
+
         return cls(
             api_key=api_key,
             base_url=base_url,
@@ -100,14 +122,16 @@ class AppConfig:
                 12_000,
                 minimum=_MIN_TOOL_OUTPUT_CHARS,
             ),
-            context_budget_chars=_positive_int(
-                source,
-                "MINICODER_CONTEXT_BUDGET_CHARS",
-                _DEFAULT_CONTEXT_BUDGET_CHARS,
-            ),
+            context_budget_chars=context_budget_chars,
+            context_response_reserve_chars=context_response_reserve_chars,
             memory_enabled=_boolean(
                 source,
                 "MINICODER_MEMORY_ENABLED",
+                True,
+            ),
+            session_archive_enabled=_boolean(
+                source,
+                "MINICODER_SESSION_ARCHIVE_ENABLED",
                 True,
             ),
             planning_enabled=_boolean(

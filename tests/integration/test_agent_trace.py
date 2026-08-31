@@ -22,6 +22,7 @@ def test_agent_jsonl_trace_excludes_message_and_tool_bodies(tmp_path: Path) -> N
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
             "MINICODER_MEMORY_ENABLED": "false",
+            "MINICODER_SESSION_ARCHIVE_ENABLED": "false",
         },
         workspace=tmp_path,
         platform_name="darwin",

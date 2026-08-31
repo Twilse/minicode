@@ -25,6 +25,10 @@ class MemoryPersistenceError(MiniCoderError):
     """Raised when optional project memory cannot be read or persisted."""
 
 
+class SessionPersistenceError(MiniCoderError):
+    """Raised when the private full-session archive cannot be accessed."""
+
+
 class UnsupportedPlatformError(ConfigurationError):
     """Raised when no safe process adapter exists for the current platform."""
 

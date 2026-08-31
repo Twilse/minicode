@@ -281,9 +281,47 @@ def test_console_sink_renders_planning_and_memory_as_optional_progress() -> None
         "[已完成] 1/2 检查项目",
         "[未关联] 计划 2/2 没有对应到独立的工具操作；不推测其具体完成时间",
         "[计划] 任务已完成，计划进度结束（共 2 项，1 项未单独关联工具操作）",
-        "[记忆] 已加载这个项目最近的 3 条记录",
-        "[记忆] 正在整理本轮可供以后参考的项目摘要…",
+        "[长期记忆] 已加载这个项目最近的 3 条记录",
+        "[记忆] 正在更新会话摘要并判断是否记录长期记忆…",
+        "[长期记忆] 已记录一条以后仍有价值的项目信息",
         "[记忆] 本地记忆文件不可用；本次任务结果不受影响",
+    ]
+
+
+def test_console_sink_distinguishes_short_term_restore_and_model_compaction() -> None:
+    output = StringIO()
+    bus = EventBus((ConsoleEventSink(output),), run_id="run-session-context")
+
+    bus.publish(
+        AgentEventKind.SESSION_CONTEXT_LOADED,
+        model_step=0,
+        details={
+            "previous_status": "failed",
+            "previous_stop_reason": "max_steps",
+            "recent_message_count": 8,
+        },
+    )
+    bus.publish(
+        AgentEventKind.CONTEXT_SUMMARY_REQUESTED,
+        model_step=4,
+        details={"source_chars": 1000, "omitted_message_count": 6},
+    )
+    bus.publish(
+        AgentEventKind.CONTEXT_SUMMARY_FAILED,
+        model_step=4,
+        details={"reason": "model_error", "fallback_chars": 300},
+    )
+    bus.publish(
+        AgentEventKind.SESSION_ARCHIVE_FAILED,
+        model_step=4,
+        details={"operation": "append"},
+    )
+
+    assert output.getvalue().splitlines() == [
+        "[短期记忆] 已恢复同一工作区最近一次会话（状态：failed）",
+        "[上下文] 正在让模型压缩较早的对话内容…",
+        "[上下文] 模型压缩未成功，已使用基础压缩结果",
+        "[短期记忆] 完整会话档案暂时不可用；本次任务仍继续",
     ]
 
 

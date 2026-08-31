@@ -31,8 +31,10 @@ def test_check_config_prints_safe_summary(tmp_path: Path) -> None:
     assert "deepseek-v4-pro" in stdout.getvalue()
     assert "verification_commands=0" in stdout.getvalue()
     assert "context_budget_chars=180000" in stdout.getvalue()
+    assert "context_response_reserve_chars=8000" in stdout.getvalue()
     assert "planning_enabled=True" in stdout.getvalue()
     assert "memory_enabled=True" in stdout.getvalue()
+    assert "session_archive_enabled=True" in stdout.getvalue()
     assert "never-print-this" not in stdout.getvalue()
     assert stderr.getvalue() == ""
 
@@ -134,6 +136,7 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "test-model",
             "MINICODER_MEMORY_ENABLED": "false",
+            "MINICODER_SESSION_ARCHIVE_ENABLED": "false",
         },
         stdout=stdout,
         stderr=stderr,
@@ -204,6 +207,7 @@ def test_cli_without_a_task_runs_an_interactive_multi_turn_session(
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "test-model",
             "MINICODER_MEMORY_ENABLED": "false",
+            "MINICODER_SESSION_ARCHIVE_ENABLED": "false",
         },
         stdin=StringIO(
             "Which language does this project use?\n"
@@ -251,6 +255,7 @@ def test_interactive_cli_exits_cleanly_on_eof_without_calling_the_model(
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "test-model",
             "MINICODER_MEMORY_ENABLED": "false",
+            "MINICODER_SESSION_ARCHIVE_ENABLED": "false",
         },
         stdin=StringIO(""),
         stdout=StringIO(),
@@ -284,6 +289,7 @@ def test_interactive_cli_returns_130_when_input_is_interrupted(
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "test-model",
             "MINICODER_MEMORY_ENABLED": "false",
+            "MINICODER_SESSION_ARCHIVE_ENABLED": "false",
         },
         stdin=InterruptingInput(),
         stdout=StringIO(),
@@ -311,6 +317,7 @@ def test_cli_rejects_trace_path_with_missing_parent(tmp_path: Path) -> None:
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
             "MINICODER_MEMORY_ENABLED": "false",
+            "MINICODER_SESSION_ARCHIVE_ENABLED": "false",
         },
         stdout=StringIO(),
         stderr=stderr,
@@ -343,6 +350,7 @@ def test_cli_returns_one_for_a_model_failure(
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
             "MINICODER_MEMORY_ENABLED": "false",
+            "MINICODER_SESSION_ARCHIVE_ENABLED": "false",
         },
         stdout=stdout,
         stderr=stderr,
@@ -387,6 +395,7 @@ def test_cli_renders_model_markdown_instead_of_printing_fence_markers(
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
             "MINICODER_MEMORY_ENABLED": "false",
+            "MINICODER_SESSION_ARCHIVE_ENABLED": "false",
         },
         stdout=stdout,
         stderr=StringIO(),

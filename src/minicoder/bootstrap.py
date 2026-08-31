@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +12,7 @@ from typing import Mapping
 from openai import OpenAI
 
 from minicoder.adapters.jsonl_memory import JsonlProjectMemoryStore
+from minicoder.adapters.jsonl_session import JsonlSessionArchive
 from minicoder.adapters.openai_compatible_chat import OpenAICompatibleChatAdapter
 from minicoder.adapters.subprocess_runner import (
     PosixSubprocessAdapter,
@@ -23,14 +24,18 @@ from minicoder.application.completion import (
     CompletionPolicy,
     EvidenceBasedCompletionPolicy,
 )
-from minicoder.application.context import ContextManager
+from minicoder.application.context import ContextManager, ModelContextSummary
 from minicoder.application.event_bus import EventBus, EventDeliveryFailure
-from minicoder.application.memory import MemorySummarizer, ModelMemorySummarizer
+from minicoder.application.memory import (
+    ModelTurnMemoryMaintainer,
+    TurnMemoryMaintainer,
+)
 from minicoder.application.ports import (
     EventSinkPort,
     ModelPort,
     ProcessPort,
     ProjectMemoryPort,
+    SessionArchivePort,
     ToolPort,
 )
 from minicoder.application.retry import (
@@ -42,11 +47,16 @@ from minicoder.application.verification import (
     ConfiguredVerificationCommand,
 )
 from minicoder.config import AppConfig
-from minicoder.domain.errors import MemoryPersistenceError
+from minicoder.application.session_context import format_recent_session_context
+from minicoder.domain.errors import (
+    MemoryPersistenceError,
+    SessionPersistenceError,
+)
 from minicoder.domain.events import AgentEventKind
 from minicoder.domain.memory import ProjectMemoryRecord
 from minicoder.domain.models import Message
-from minicoder.domain.state import AgentPhase, AgentRunResult
+from minicoder.domain.session import RecentSessionContext
+from minicoder.domain.state import AgentRunResult
 from minicoder.platforms import OperatingSystem, detect_operating_system
 from minicoder.tools.command_safety import CommandSafetyPolicy
 from minicoder.tools.files import (
@@ -87,20 +97,23 @@ class AgentSession:
         artifacts: ToolOutputArtifactStore,
         events: EventBus,
         memory_store: ProjectMemoryPort | None = None,
-        memory_summarizer: MemorySummarizer | None = None,
+        memory_maintainer: TurnMemoryMaintainer | None = None,
         initial_memory: Sequence[ProjectMemoryRecord] = (),
+        archive: SessionArchivePort | None = None,
+        recent_session_context: RecentSessionContext | None = None,
     ) -> None:
-        if (memory_store is None) != (memory_summarizer is None):
-            raise ValueError(
-                "memory store and summarizer must be configured together"
-            )
         self._engine = engine
         self._artifacts = artifacts
         self._events = events
         self._memory_store = memory_store
-        self._memory_summarizer = memory_summarizer
-        self._initial_memory = tuple(initial_memory)
+        self._memory_maintainer = memory_maintainer
+        self._project_memory = list(initial_memory)
+        self._archive = archive
+        self._rolling_context = format_recent_session_context(
+            recent_session_context
+        )
         self._history: tuple[Message, ...] = ()
+        self._turn_index = 0
         self._closed = False
 
     @property
@@ -119,49 +132,98 @@ class AgentSession:
 
         return self._history
 
+    @property
+    def rolling_context(self) -> str:
+        """Return the latest model-maintained session summary."""
+
+        return self._rolling_context
+
     def submit(self, user_message: str) -> AgentRunResult:
         """Run one user turn without closing the shared session resources."""
 
         if self._closed:
             raise RuntimeError("agent session is already closed")
+        self._turn_index += 1
+        turn_index = self._turn_index
+        self._archive_safely(
+            "record_turn_started",
+            lambda: self._archive.record_turn_started(
+                task=user_message,
+                turn_index=turn_index,
+            )
+            if self._archive is not None
+            else None,
+            model_step=0,
+        )
+        previous_message_count = len(self._history)
         result = self._engine.run_turn(
             user_message,
             history=self._history,
-            project_memory=self._initial_memory if not self._history else (),
+            project_memory=tuple(self._project_memory),
+            reference_context=self._rolling_context,
+            turn_index=turn_index,
         )
         self._history = result.messages
-        if (
-            result.phase is AgentPhase.COMPLETE
-            and result.final_response is not None
-            and self._memory_store is not None
-            and self._memory_summarizer is not None
-        ):
-            summary = self._memory_summarizer.summarize(
+        self._archive_safely(
+            "record_turn_result",
+            lambda: self._archive.record_turn_result(
                 task=user_message,
-                outcome=result.final_response,
+                result=result,
+                turn_index=turn_index,
+            )
+            if self._archive is not None
+            else None,
+            model_step=result.model_steps,
+        )
+        if self._memory_maintainer is not None:
+            decision = self._memory_maintainer.maintain(
+                task=user_message,
+                result=result,
+                turn_messages=result.messages[previous_message_count:],
+                previous_context=self._rolling_context or None,
+                project_memory=tuple(self._project_memory),
+                model_step=result.model_steps,
+                turn_index=turn_index,
+            )
+            self._rolling_context = decision.context_summary
+            self._archive_safely(
+                "record_maintenance",
+                lambda: self._archive.record_maintenance(
+                    context_summary=decision.context_summary,
+                    memory_summary=decision.memory_summary,
+                    used_fallback=decision.used_fallback,
+                    turn_index=turn_index,
+                    model_step=result.model_steps,
+                )
+                if self._archive is not None
+                else None,
                 model_step=result.model_steps,
             )
-            record = ProjectMemoryRecord(
-                recorded_at=datetime.now(timezone.utc),
-                summary=summary,
-            )
-            try:
-                self._memory_store.append(record)
-            except MemoryPersistenceError as exc:
-                self._events.publish(
-                    AgentEventKind.MEMORY_OPERATION_FAILED,
-                    model_step=result.model_steps,
-                    details={
-                        "operation": "append",
-                        "error_type": type(exc).__name__,
-                    },
+            if decision.memory_summary is not None and self._memory_store is not None:
+                record = ProjectMemoryRecord(
+                    recorded_at=datetime.now(timezone.utc),
+                    summary=decision.memory_summary,
                 )
-            else:
-                self._events.publish(
-                    AgentEventKind.MEMORY_SAVED,
-                    model_step=result.model_steps,
-                    details={"summary_chars": len(summary)},
-                )
+                try:
+                    self._memory_store.append(record)
+                except MemoryPersistenceError as exc:
+                    self._events.publish(
+                        AgentEventKind.MEMORY_OPERATION_FAILED,
+                        model_step=result.model_steps,
+                        details={
+                            "operation": "append",
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                else:
+                    self._project_memory.append(record)
+                    self._events.publish(
+                        AgentEventKind.MEMORY_SAVED,
+                        model_step=result.model_steps,
+                        details={
+                            "summary_chars": len(decision.memory_summary),
+                        },
+                    )
         return result
 
     def run(self, task: str) -> AgentRunResult:
@@ -186,12 +248,42 @@ class AgentSession:
         self.close()
 
     def close(self) -> None:
-        """Idempotently invalidate output IDs and remove temporary files."""
+        """Flush the session archive, then remove temporary tool artifacts."""
 
         if self._closed:
             return
         self._closed = True
+        self._archive_safely(
+            "close",
+            lambda: self._archive.close(
+                context_summary=self._rolling_context or None,
+            )
+            if self._archive is not None
+            else None,
+            model_step=0,
+        )
         self._artifacts.close()
+
+    def _archive_safely(
+        self,
+        operation: str,
+        action: Callable[[], object],
+        *,
+        model_step: int,
+    ) -> None:
+        if self._archive is None:
+            return
+        try:
+            action()
+        except SessionPersistenceError as exc:
+            self._events.publish(
+                AgentEventKind.SESSION_ARCHIVE_FAILED,
+                model_step=model_step,
+                details={
+                    "operation": operation,
+                    "error_type": type(exc).__name__,
+                },
+            )
 
 
 class ApplicationFactory:
@@ -243,10 +335,37 @@ class ApplicationFactory:
         return StreamAwareOutputCompactor()
 
     @staticmethod
-    def create_context_manager(config: AppConfig) -> ContextManager:
-        """Create deterministic context budgeting from provider-neutral config."""
+    def create_context_manager(
+        config: AppConfig,
+        *,
+        model: ModelPort,
+        events: EventBus,
+        archive: SessionArchivePort | None = None,
+    ) -> ContextManager:
+        """Create total-request budgeting with model-based semantic compaction."""
 
-        return ContextManager(budget_chars=config.context_budget_chars)
+        return ContextManager(
+            budget_chars=config.context_budget_chars,
+            response_reserve_chars=config.context_response_reserve_chars,
+            summary_strategy=ModelContextSummary(
+                model=model,
+                events=events,
+                archive=archive,
+                source_chars=max(
+                    1_000,
+                    min(
+                        120_000,
+                        config.context_budget_chars
+                        - config.context_response_reserve_chars
+                        - 2_000,
+                    ),
+                ),
+                request_input_budget_chars=(
+                    config.context_budget_chars
+                    - config.context_response_reserve_chars
+                ),
+            ),
+        )
 
     @staticmethod
     def create_completion_policy(
@@ -278,18 +397,66 @@ class ApplicationFactory:
         )
 
     @staticmethod
-    def create_memory_summarizer(
+    def create_session_archive(config: AppConfig) -> SessionArchivePort:
+        """Create the exact private archive for one local process."""
+
+        return JsonlSessionArchive(workspace=config.workspace)
+
+    @staticmethod
+    def create_memory_maintainer(
         config: AppConfig,
         *,
         model: ModelPort,
         events: EventBus,
-    ) -> MemorySummarizer:
-        """Create the one-shot no-tool model memory summarizer."""
+        archive: SessionArchivePort | None,
+    ) -> TurnMemoryMaintainer:
+        """Create one post-turn context and long-term-memory decision service."""
 
-        return ModelMemorySummarizer(
+        source_budget = max(
+            1_024,
+            config.context_budget_chars
+            - config.context_response_reserve_chars
+            - 2_500,
+        )
+        task_chars = min(2_000, max(128, source_budget // 12))
+        outcome_chars = min(4_000, max(256, source_budget // 6))
+        previous_chars = min(18_000, max(256, source_budget // 6))
+        transcript_chars = max(
+            256,
+            min(
+                120_000,
+                source_budget
+                - task_chars
+                - outcome_chars
+                - (2 * previous_chars),
+            ),
+        )
+        maintenance_payload_chars = max(
+            128,
+            config.context_response_reserve_chars - 256,
+        )
+        return ModelTurnMemoryMaintainer(
             model=model,
             events=events,
             sensitive_values=(config.api_key,),
+            allow_long_term_memory=config.memory_enabled,
+            task_input_chars=task_chars,
+            outcome_input_chars=outcome_chars,
+            transcript_input_chars=transcript_chars,
+            previous_context_chars=previous_chars,
+            context_summary_chars=min(
+                6_000,
+                max(64, maintenance_payload_chars * 4 // 5),
+            ),
+            memory_summary_chars=min(
+                1_200,
+                max(32, maintenance_payload_chars // 5),
+            ),
+            request_input_budget_chars=(
+                config.context_budget_chars
+                - config.context_response_reserve_chars
+            ),
+            archive=archive,
         )
 
     @staticmethod
@@ -333,6 +500,7 @@ class ApplicationFactory:
         process_adapter: ProcessPort | None = None,
         event_sinks: Sequence[EventSinkPort] = (),
         memory_store: ProjectMemoryPort | None = None,
+        session_archive: SessionArchivePort | None = None,
     ) -> AgentSession:
         """Assemble one task session while retaining ownership of its resources."""
 
@@ -348,8 +516,42 @@ class ApplicationFactory:
             else process_adapter
         )
         events = EventBus(event_sinks)
+        active_archive: SessionArchivePort | None = None
+        recent_session_context: RecentSessionContext | None = None
+        if config.session_archive_enabled:
+            try:
+                active_archive = (
+                    ApplicationFactory.create_session_archive(config)
+                    if session_archive is None
+                    else session_archive
+                )
+                recent_session_context = active_archive.load_latest_context()
+            except SessionPersistenceError as exc:
+                events.publish(
+                    AgentEventKind.SESSION_ARCHIVE_FAILED,
+                    model_step=0,
+                    details={
+                        "operation": "load_latest_context",
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                active_archive = None
+            else:
+                if recent_session_context is not None:
+                    events.publish(
+                        AgentEventKind.SESSION_CONTEXT_LOADED,
+                        model_step=0,
+                        details={
+                            "previous_status": recent_session_context.status.value,
+                            "previous_stop_reason": (
+                                recent_session_context.stop_reason
+                            ),
+                            "recent_message_count": len(
+                                recent_session_context.recent_messages
+                            ),
+                        },
+                    )
         active_memory_store: ProjectMemoryPort | None = None
-        memory_summarizer: MemorySummarizer | None = None
         initial_memory: tuple[ProjectMemoryRecord, ...] = ()
         if config.memory_enabled:
             try:
@@ -376,11 +578,14 @@ class ApplicationFactory:
                         model_step=0,
                         details={"record_count": len(initial_memory)},
                     )
-                memory_summarizer = ApplicationFactory.create_memory_summarizer(
-                    config,
-                    model=model,
-                    events=events,
-                )
+        memory_maintainer: TurnMemoryMaintainer | None = None
+        if config.session_archive_enabled or config.memory_enabled:
+            memory_maintainer = ApplicationFactory.create_memory_maintainer(
+                config,
+                model=model,
+                events=events,
+                archive=active_archive,
+            )
         artifacts = ToolOutputArtifactStore(
             max_read_chars=config.max_tool_output_chars // 2,
         )
@@ -395,12 +600,18 @@ class ApplicationFactory:
                 tools=tools,
                 max_steps=config.max_steps,
                 events=events,
-                context=ApplicationFactory.create_context_manager(config),
+                context=ApplicationFactory.create_context_manager(
+                    config,
+                    model=model,
+                    events=events,
+                    archive=active_archive,
+                ),
                 retries=ApplicationFactory.create_retry_strategy(),
                 completion=ApplicationFactory.create_completion_policy(
                     context.verification_commands,
                 ),
                 planning_enabled=config.planning_enabled,
+                archive=active_archive,
             )
         except Exception:
             artifacts.close()
@@ -410,6 +621,8 @@ class ApplicationFactory:
             artifacts=artifacts,
             events=events,
             memory_store=active_memory_store,
-            memory_summarizer=memory_summarizer,
+            memory_maintainer=memory_maintainer,
             initial_memory=initial_memory,
+            archive=active_archive,
+            recent_session_context=recent_session_context,
         )

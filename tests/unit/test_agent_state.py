@@ -52,6 +52,15 @@ def test_state_machine_rejects_a_model_call_after_the_step_limit() -> None:
         state.begin_model_call()
 
 
+def test_state_machine_can_fail_a_host_preflight_before_any_model_request() -> None:
+    state = AgentStateMachine(max_steps=1)
+
+    state.fail()
+
+    assert state.phase is AgentPhase.FAILED
+    assert state.model_steps == 0
+
+
 def test_state_machine_rejects_transition_out_of_a_terminal_phase() -> None:
     state = AgentStateMachine(max_steps=1)
     state.begin_model_call()

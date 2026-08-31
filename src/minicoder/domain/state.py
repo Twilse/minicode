@@ -28,6 +28,7 @@ class AgentStopReason(str, Enum):
     MAX_STEPS = "max_steps"
     MODEL_ERROR = "model_error"
     PLANNING_ERROR = "planning_error"
+    CONTEXT_BUDGET_EXCEEDED = "context_budget_exceeded"
     USER_INTERRUPTED = "user_interrupted"
     VERIFICATION_UNSUPPORTED = "verification_unsupported"
 
@@ -38,7 +39,7 @@ class AgentRunResult:
 
     phase: AgentPhase  # COMPLETE or FAILED terminal phase.
     stop_reason: AgentStopReason  # Stable explanation for termination.
-    model_steps: int  # Number of model requests attempted.
+    model_steps: int  # Task-loop model requests attempted; housekeeping is excluded.
     messages: tuple[Message, ...]  # Complete in-memory conversation at termination.
     final_response: str | None = None  # Final assistant text on successful completion.
     failure_message: str | None = None  # Host-readable reason when the task failed.
@@ -73,7 +74,9 @@ class AgentStateMachine:
     """Validate phase transitions and count model-request steps."""
 
     _ALLOWED_TRANSITIONS = {
-        AgentPhase.READY: frozenset({AgentPhase.CALL_MODEL}),
+        AgentPhase.READY: frozenset(
+            {AgentPhase.CALL_MODEL, AgentPhase.FAILED}
+        ),
         AgentPhase.CALL_MODEL: frozenset(
             {
                 AgentPhase.PLAN_READY,

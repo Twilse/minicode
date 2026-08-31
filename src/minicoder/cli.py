@@ -198,7 +198,10 @@ def _configuration_summary(context: BootstrapContext) -> str:
             f"operating_system={context.operating_system.value}",
             f"verification_commands={len(context.verification_commands)}",
             f"context_budget_chars={config.context_budget_chars}",
+            "context_response_reserve_chars="
+            f"{config.context_response_reserve_chars}",
             f"planning_enabled={config.planning_enabled}",
             f"memory_enabled={config.memory_enabled}",
+            f"session_archive_enabled={config.session_archive_enabled}",
         )
     )

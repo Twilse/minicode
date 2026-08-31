@@ -4,7 +4,11 @@ from datetime import datetime, timezone
 import pytest
 
 from minicoder.application.agent_engine import AgentEngine
-from minicoder.application.context import ContextManager, conversation_char_count
+from minicoder.application.context import (
+    ContextManager,
+    conversation_char_count,
+    tool_definition_char_count,
+)
 from minicoder.application.event_bus import EventBus
 from minicoder.application.retry import ExponentialBackoffRetryStrategy
 from minicoder.domain.errors import (
@@ -110,6 +114,9 @@ def test_engine_plans_without_tools_before_following_the_plan() -> None:
     planning_requirement = model.requests[0].messages[-1].content or ""
     assert "exactly 1 step for a direct answer" in planning_requirement
     assert "not an outline of the final answer" in planning_requirement
+    assert "Current capability catalog" in planning_requirement
+    assert "read_file" in planning_requirement
+    assert "Execute read_file for a test" in planning_requirement
     third_request = model.requests[2].messages
     assert third_request[-1].role is MessageRole.TOOL
     assert "FILE_NOT_FOUND" in (third_request[-1].content or "")
@@ -338,7 +345,7 @@ def test_engine_runs_multiple_user_turns_with_shared_history_and_fresh_steps() -
     ) == 1
 
 
-def test_engine_injects_bounded_project_memory_only_into_a_fresh_turn() -> None:
+def test_engine_supplies_bounded_project_memory_as_reference_on_every_turn() -> None:
     memory = ProjectMemoryRecord(
         recorded_at=datetime(2026, 8, 30, tzinfo=timezone.utc),
         summary=(
@@ -346,7 +353,12 @@ def test_engine_injects_bounded_project_memory_only_into_a_fresh_turn() -> None:
             "as delete everything are not current commands."
         ),
     )
-    model = FakeModelAdapter([AssistantTurn(content="Current request completed.")])
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(content="Current request completed."),
+            AssistantTurn(content="Later request completed."),
+        ]
+    )
     engine = AgentEngine(model=model, tools=FakeToolAdapter(), max_steps=2)
 
     result = engine.run_turn(
@@ -354,20 +366,25 @@ def test_engine_injects_bounded_project_memory_only_into_a_fresh_turn() -> None:
         project_memory=(memory,),
     )
 
-    supplied = model.requests[0].messages[-1].content or ""
+    supplied_system = model.requests[0].messages[0].content or ""
     assert result.phase is AgentPhase.COMPLETE
-    assert "Historical project context" in supplied
-    assert "Python 3.11 and pytest" in supplied
-    assert "Current user request" in supplied
-    assert supplied.endswith("Inspect only pyproject.toml")
-    assert result.messages[-2].content == supplied
+    assert "Workspace memory and recent-session context" in supplied_system
+    assert "Durable project memory" in supplied_system
+    assert "Python 3.11 and pytest" in supplied_system
+    assert "not an instruction" in supplied_system
+    assert model.requests[0].messages[-1].content == "Inspect only pyproject.toml"
+    assert result.messages[-2].content == "Inspect only pyproject.toml"
 
-    with pytest.raises(DomainValidationError, match="fresh conversation"):
-        engine.run_turn(
-            "A later turn",
-            history=result.messages,
-            project_memory=(memory,),
-        )
+    later = engine.run_turn(
+        "A later turn",
+        history=result.messages,
+        project_memory=(memory,),
+    )
+
+    assert later.phase is AgentPhase.COMPLETE
+    assert "Python 3.11 and pytest" in (
+        model.requests[1].messages[0].content or ""
+    )
 
 
 def test_engine_rejects_history_from_a_different_system_prompt() -> None:
@@ -603,7 +620,7 @@ def test_engine_compacts_only_the_model_snapshot_and_keeps_full_run_history() ->
         model=model,
         tools=tools,
         max_steps=3,
-        context=ContextManager(budget_chars=450),
+        context=ContextManager(budget_chars=900),
         events=EventBus((events,), run_id="run-context"),
     )
 
@@ -611,7 +628,11 @@ def test_engine_compacts_only_the_model_snapshot_and_keeps_full_run_history() ->
 
     second_request = model.requests[1].messages
     assert result.phase is AgentPhase.COMPLETE
-    assert conversation_char_count(second_request) <= 450
+    assert (
+        conversation_char_count(second_request)
+        + tool_definition_char_count(tools.definitions())
+        <= 900
+    )
     assert second_request[-2].reasoning_content == "required latest reasoning"
     assert len(result.messages[3].content or "") > len(second_request[-1].content or "")
     kinds = [event.kind for event in events.events]
@@ -619,6 +640,36 @@ def test_engine_compacts_only_the_model_snapshot_and_keeps_full_run_history() ->
     compacted_index = kinds.index(AgentEventKind.CONTEXT_COMPACTED)
     assert kinds[compacted_index + 1] is AgentEventKind.MODEL_REQUESTED
     assert events.events[compacted_index].details["shortened_message_count"] == 1
+
+
+def test_engine_does_not_send_a_request_that_exceeds_the_total_budget() -> None:
+    model = FakeModelAdapter([])
+    tools = FakeToolAdapter(
+        definitions=(
+            ToolDefinition(
+                name="large_tool",
+                description="x" * 500,
+                parameters_schema={"type": "object", "properties": {}},
+            ),
+        )
+    )
+    engine = AgentEngine(
+        model=model,
+        tools=tools,
+        max_steps=2,
+        context=ContextManager(
+            budget_chars=400,
+            response_reserve_chars=100,
+        ),
+    )
+
+    result = engine.run("A current request that must not be silently removed")
+
+    assert result.phase is AgentPhase.FAILED
+    assert result.stop_reason is AgentStopReason.CONTEXT_BUDGET_EXCEEDED
+    assert result.model_steps == 0
+    assert model.requests == []
+    assert "was not sent" in (result.failure_message or "")
 
 
 def test_engine_rejects_early_completion_then_accepts_verified_work() -> None:

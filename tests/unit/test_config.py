@@ -28,7 +28,9 @@ def test_from_environment_loads_required_model_settings_and_safe_defaults(
     assert config.model_timeout_seconds == 60.0
     assert config.command_timeout_seconds == 30.0
     assert config.context_budget_chars == 180_000
+    assert config.context_response_reserve_chars == 8_000
     assert config.memory_enabled is True
+    assert config.session_archive_enabled is True
     assert config.planning_enabled is True
 
 
@@ -43,7 +45,9 @@ def test_from_environment_accepts_explicit_overrides(tmp_path: Path) -> None:
             "MINICODER_COMMAND_TIMEOUT_SECONDS": "2.5",
             "MINICODER_MAX_TOOL_OUTPUT_CHARS": "800",
             "MINICODER_CONTEXT_BUDGET_CHARS": "9000",
+            "MINICODER_CONTEXT_RESPONSE_RESERVE_CHARS": "1200",
             "MINICODER_MEMORY_ENABLED": "no",
+            "MINICODER_SESSION_ARCHIVE_ENABLED": "off",
             "MINICODER_PLANNING_ENABLED": "off",
         },
         workspace=tmp_path,
@@ -56,7 +60,9 @@ def test_from_environment_accepts_explicit_overrides(tmp_path: Path) -> None:
     assert config.command_timeout_seconds == 2.5
     assert config.max_tool_output_chars == 800
     assert config.context_budget_chars == 9000
+    assert config.context_response_reserve_chars == 1200
     assert config.memory_enabled is False
+    assert config.session_archive_enabled is False
     assert config.planning_enabled is False
 
 
@@ -106,6 +112,21 @@ def test_from_environment_accepts_explicit_overrides(tmp_path: Path) -> None:
         (
             {**REQUIRED_MODEL_ENV, "MINICODER_MEMORY_ENABLED": "sometimes"},
             "must be one of",
+        ),
+        (
+            {
+                **REQUIRED_MODEL_ENV,
+                "MINICODER_SESSION_ARCHIVE_ENABLED": "sometimes",
+            },
+            "must be one of",
+        ),
+        (
+            {
+                **REQUIRED_MODEL_ENV,
+                "MINICODER_CONTEXT_BUDGET_CHARS": "1000",
+                "MINICODER_CONTEXT_RESPONSE_RESERVE_CHARS": "1000",
+            },
+            "must be below",
         ),
         (
             {**REQUIRED_MODEL_ENV, "MINICODER_PLANNING_ENABLED": "later"},

@@ -16,6 +16,8 @@ from minicoder.domain.models import (
     ToolDefinition,
     ToolResult,
 )
+from minicoder.domain.session import RecentSessionContext
+from minicoder.domain.state import AgentRunResult
 
 
 class EventSinkPort(Protocol):
@@ -50,7 +52,93 @@ class ProjectMemoryPort(Protocol):
         ...
 
     def append(self, record: ProjectMemoryRecord) -> None:
-        """Persist one completed-turn memory without changing older records."""
+        """Persist one model-selected durable memory without changing older records."""
+
+        ...
+
+
+class SessionArchivePort(Protocol):
+    """Persist exact model exchanges and restore the previous process context."""
+
+    @property
+    def session_id(self) -> str:
+        """Return the identifier of the process-owned archive."""
+
+        ...
+
+    def load_latest_context(self) -> RecentSessionContext | None:
+        """Load the latest usable session for the same workspace."""
+
+        ...
+
+    def record_turn_started(self, *, task: str, turn_index: int) -> None:
+        """Persist the exact external request before the agent starts work."""
+
+        ...
+
+    def record_model_request(
+        self,
+        *,
+        messages: Sequence[Message],
+        tools: Sequence[ToolDefinition],
+        request_kind: str,
+        turn_index: int,
+        model_step: int,
+    ) -> None:
+        """Persist one exact normalized request, including current tool schemas."""
+
+        ...
+
+    def record_model_response(
+        self,
+        *,
+        turn: AssistantTurn,
+        request_kind: str,
+        turn_index: int,
+        model_step: int,
+    ) -> None:
+        """Persist one exact normalized model response."""
+
+        ...
+
+    def record_tool_result(
+        self,
+        *,
+        call: ToolCall,
+        result: ToolResult,
+        turn_index: int,
+        model_step: int,
+    ) -> None:
+        """Persist the complete local result and host metadata."""
+
+        ...
+
+    def record_turn_result(
+        self,
+        *,
+        task: str,
+        result: AgentRunResult,
+        turn_index: int,
+    ) -> None:
+        """Persist one terminal turn snapshot, including failures."""
+
+        ...
+
+    def record_maintenance(
+        self,
+        *,
+        context_summary: str,
+        memory_summary: str | None,
+        used_fallback: bool,
+        turn_index: int,
+        model_step: int,
+    ) -> None:
+        """Persist the post-turn model maintenance decision."""
+
+        ...
+
+    def close(self, *, context_summary: str | None) -> None:
+        """Mark a normal process close while retaining every prior record."""
 
         ...
 

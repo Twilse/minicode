@@ -1,6 +1,8 @@
 from pathlib import Path
+import json
 
 from minicoder.adapters.jsonl_memory import JsonlProjectMemoryStore
+from minicoder.adapters.jsonl_session import JsonlSessionArchive
 from minicoder.adapters.jsonl_trace import JsonlTraceSink
 from minicoder.adapters.subprocess_runner import PosixSubprocessAdapter
 from minicoder.bootstrap import ApplicationFactory
@@ -38,18 +40,32 @@ def test_successful_turn_is_summarized_and_loaded_by_a_new_session(
             AssistantTurn(content="1. Add the parser.\n2. Run tests."),
             AssistantTurn(content="Added parser.py and passed 4 tests."),
             AssistantTurn(
-                content=(
-                    "Added parser.py with compatibility checks; 4 tests passed. "
-                    "private-api-key"
+                content=json.dumps(
+                    {
+                        "context_summary": (
+                            "Added parser.py with compatibility checks; "
+                            "4 tests passed."
+                        ),
+                        "memory_action": "append",
+                        "memory_summary": (
+                            "Added parser.py with compatibility checks; "
+                            "4 tests passed. private-api-key"
+                        ),
+                    }
                 )
             ),
         ]
+    )
+    first_archive = JsonlSessionArchive(
+        workspace=workspace,
+        storage_root=tmp_path / "private-sessions",
     )
     first_session = ApplicationFactory.create_agent_session(
         _context(workspace),
         model_adapter=first_model,
         process_adapter=PosixSubprocessAdapter(),
         memory_store=first_store,
+        session_archive=first_archive,
     )
 
     first_result = first_session.run("Add a parser without exposing this task body")
@@ -79,23 +95,44 @@ def test_successful_turn_is_summarized_and_loaded_by_a_new_session(
         [
             AssistantTurn(content="1. Review the project memory.\n2. Answer."),
             AssistantTurn(content="Used the earlier parser information."),
-            AssistantTurn(content="Confirmed the parser context was reused."),
+            AssistantTurn(
+                content=json.dumps(
+                    {
+                        "context_summary": (
+                            "Confirmed the previous parser context was reused."
+                        ),
+                        "memory_action": "none",
+                        "memory_summary": None,
+                    }
+                )
+            ),
         ]
+    )
+    second_archive = JsonlSessionArchive(
+        workspace=workspace,
+        storage_root=tmp_path / "private-sessions",
     )
     second_session = ApplicationFactory.create_agent_session(
         _context(workspace),
         model_adapter=second_model,
         process_adapter=PosixSubprocessAdapter(),
         memory_store=second_store,
+        session_archive=second_archive,
     )
 
     second_result = second_session.run("What parser work was done before?")
 
     first_request = second_model.requests[0].messages
     assert second_result.phase is AgentPhase.COMPLETE
-    assert "Historical project context" in (first_request[-1].content or "")
+    assert "Workspace memory and recent-session context" in (
+        first_request[0].content or ""
+    )
+    assert "Recent cross-process and current-session context" in (
+        first_request[0].content or ""
+    )
+    assert "Durable project memory" in (first_request[0].content or "")
     assert "Added parser.py with compatibility checks" in (
-        first_request[-1].content or ""
+        first_request[0].content or ""
     )
     assert "What parser work was done before?" in (
         first_request[-1].content or ""
@@ -119,7 +156,15 @@ def test_project_memory_isolated_by_workspace_and_trace_stays_sanitized(
         [
             AssistantTurn(content="1. Inspect the project.\n2. Answer."),
             AssistantTurn(content="private final response"),
-            AssistantTurn(content="private semantic memory"),
+            AssistantTurn(
+                content=json.dumps(
+                    {
+                        "context_summary": "private current session context",
+                        "memory_action": "append",
+                        "memory_summary": "private semantic memory",
+                    }
+                )
+            ),
         ]
     )
     trace_path = tmp_path / "trace.jsonl"
@@ -129,6 +174,10 @@ def test_project_memory_isolated_by_workspace_and_trace_stays_sanitized(
         process_adapter=PosixSubprocessAdapter(),
         event_sinks=(JsonlTraceSink(trace_path),),
         memory_store=first_store,
+        session_archive=JsonlSessionArchive(
+            workspace=first_workspace,
+            storage_root=tmp_path / "private-sessions",
+        ),
     )
 
     session.run("private user task")
