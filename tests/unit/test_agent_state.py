@@ -27,12 +27,16 @@ def test_state_machine_accepts_the_model_tool_model_completion_path() -> None:
 
 
 def test_state_machine_accepts_plan_before_execution() -> None:
-    state = AgentStateMachine(max_steps=2)
+    state = AgentStateMachine(max_steps=2, planning_required=True)
 
-    state.begin_model_call()
+    state.begin_planning_call()
+    assert state.phase is AgentPhase.PLANNING
+    assert state.plan_completed is False
+
     state.plan_ready()
 
     assert state.phase is AgentPhase.PLAN_READY
+    assert state.plan_completed is True
     assert state.can_call_model is True
 
     state.begin_model_call()
@@ -40,6 +44,42 @@ def test_state_machine_accepts_plan_before_execution() -> None:
 
     assert state.phase is AgentPhase.COMPLETE
     assert state.model_steps == 2
+
+
+def test_state_machine_blocks_execution_and_tools_until_plan_is_ready() -> None:
+    state = AgentStateMachine(max_steps=3, planning_required=True)
+
+    with pytest.raises(AgentStateError, match="before a plan is ready"):
+        state.begin_model_call()
+
+    state.begin_planning_call()
+
+    with pytest.raises(AgentStateError, match="before a plan is ready"):
+        state.begin_tool_execution()
+
+    state.plan_ready()
+    state.begin_model_call()
+    state.begin_tool_execution()
+
+    assert state.phase is AgentPhase.EXECUTE_TOOLS
+
+
+def test_state_machine_allows_bounded_planning_format_retries() -> None:
+    state = AgentStateMachine(max_steps=3, planning_required=True)
+
+    state.begin_planning_call()
+    state.begin_planning_call()
+    state.plan_ready()
+
+    assert state.phase is AgentPhase.PLAN_READY
+    assert state.model_steps == 2
+
+
+def test_state_machine_rejects_planning_when_it_is_disabled() -> None:
+    state = AgentStateMachine(max_steps=1)
+
+    with pytest.raises(AgentStateError, match="cannot call planning model"):
+        state.begin_planning_call()
 
 
 def test_state_machine_rejects_a_model_call_after_the_step_limit() -> None:
@@ -89,6 +129,14 @@ def test_state_machine_allows_policy_feedback_before_another_model_call() -> Non
 def test_state_machine_requires_a_positive_integer_limit(max_steps: object) -> None:
     with pytest.raises(DomainValidationError, match="positive integer"):
         AgentStateMachine(max_steps=max_steps)  # type: ignore[arg-type]
+
+
+def test_state_machine_requires_a_boolean_planning_flag() -> None:
+    with pytest.raises(DomainValidationError, match="must be a boolean"):
+        AgentStateMachine(
+            max_steps=1,
+            planning_required="yes",  # type: ignore[arg-type]
+        )
 
 
 def test_run_result_rejects_a_non_terminal_phase() -> None:

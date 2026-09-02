@@ -12,6 +12,7 @@ from minicoder.domain.models import ToolCall, ToolResult
 from minicoder.tools.files import (
     BINARY_FILE,
     FILE_ALREADY_EXISTS,
+    FILE_CONTENT_MISMATCH,
     FILE_IO_ERROR,
     INVALID_OFFSET,
     NO_CHANGES,
@@ -25,6 +26,7 @@ from minicoder.tools.files import (
     ReadFileTool,
     ReplaceTextTool,
     SearchTextTool,
+    WriteFileTool,
 )
 from minicoder.tools.registry import INVALID_ARGUMENTS, ToolRegistry
 from minicoder.tools.safety import PATH_OUTSIDE_WORKSPACE, WorkspacePathPolicy
@@ -38,6 +40,7 @@ def _registry(workspace: Path, *, read_limit: int = 12_000) -> ToolRegistry:
             ReadFileTool(paths, max_chars=read_limit),
             SearchTextTool(paths),
             CreateFileTool(paths),
+            WriteFileTool(paths),
             ReplaceTextTool(paths),
         )
     )
@@ -327,6 +330,84 @@ def test_create_file_can_require_the_parent_to_exist(tmp_path: Path) -> None:
 
     assert result.error_code == PARENT_DIRECTORY_NOT_FOUND
     assert not (workspace / "missing").exists()
+
+
+def test_write_file_populates_an_existing_empty_file_and_preserves_mode(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "empty.py"
+    target.write_text("", encoding="utf-8")
+    os.chmod(target, 0o744)
+
+    result = _execute(
+        _registry(workspace),
+        "write_file",
+        {
+            "path": "empty.py",
+            "expected_content": "",
+            "content": "print('ready')\n",
+        },
+    )
+
+    assert result.ok is True
+    assert result.metadata == {
+        "path": "empty.py",
+        "old_characters": 0,
+        "new_characters": 15,
+    }
+    assert target.read_text(encoding="utf-8") == "print('ready')\n"
+    if os.name != "nt":
+        assert stat.S_IMODE(target.stat().st_mode) == 0o744
+
+
+def test_write_file_rejects_stale_expected_content_without_modifying_file(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "config.py"
+    target.write_text("timeout = 30\n", encoding="utf-8")
+
+    result = _execute(
+        _registry(workspace),
+        "write_file",
+        {
+            "path": "config.py",
+            "expected_content": "timeout = 10\n",
+            "content": "timeout = 60\n",
+        },
+    )
+
+    assert result.error_code == FILE_CONTENT_MISMATCH
+    assert "Read the file again" in result.content
+    assert target.read_text(encoding="utf-8") == "timeout = 30\n"
+
+
+def test_write_file_requires_an_existing_file_and_exact_schema(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    registry = _registry(workspace)
+
+    missing = _execute(
+        registry,
+        "write_file",
+        {
+            "path": "missing.py",
+            "expected_content": "",
+            "content": "new\n",
+        },
+    )
+    missing_guard = _execute(
+        registry,
+        "write_file",
+        {"path": "missing.py", "content": "new\n"},
+    )
+
+    assert missing.error_code == file_tools.FILE_NOT_FOUND
+    assert missing_guard.error_code == INVALID_ARGUMENTS
+    assert not (workspace / "missing.py").exists()
 
 
 def test_replace_text_changes_one_unique_match_and_preserves_file_mode(

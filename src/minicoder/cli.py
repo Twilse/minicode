@@ -21,6 +21,7 @@ from minicoder.adapters.terminal_ui import (
 from minicoder.application.ports import EventSinkPort
 from minicoder.bootstrap import AgentSession, ApplicationFactory, BootstrapContext
 from minicoder.domain.errors import MiniCoderError
+from minicoder.domain.session import ArchivedDialogueTurn, ArchivedTurnStatus
 from minicoder.domain.state import AgentPhase
 
 
@@ -89,7 +90,11 @@ def main(
         print(_configuration_summary(context), file=output)
         return 0
 
-    event_sinks: list[EventSinkPort] = [ConsoleEventSink(output)]
+    console_sink = ConsoleEventSink(
+        output,
+        defer_recovery_messages=True,
+    )
+    event_sinks: list[EventSinkPort] = [console_sink]
     if args.trace is not None:
         try:
             event_sinks.append(JsonlTraceSink(args.trace))
@@ -105,6 +110,12 @@ def main(
             context,
             event_sinks=event_sinks,
         )
+        _render_dialogue_history(
+            session.dialogue_history,
+            renderer=renderer,
+            output=output,
+        )
+        console_sink.flush_recovery_messages()
         if args.task is None:
             return _run_interactive(
                 session,
@@ -184,6 +195,39 @@ def _print_event_failures(
             file=error_output,
         )
     return len(failures)
+
+
+def _render_dialogue_history(
+    turns: Sequence[ArchivedDialogueTurn],
+    *,
+    renderer: MarkdownTerminalRenderer,
+    output: TextIO,
+) -> None:
+    """Replay exact external dialogue while hiding host/model protocol records."""
+
+    if not turns:
+        return
+    for position, turn in enumerate(turns):
+        if position > 0:
+            print(file=output)
+        print("你：", file=output)
+        print(turn.task, file=output)
+        print("MiniCoder：", file=output)
+        if turn.final_response is not None:
+            renderer.render(turn.final_response)
+        elif turn.status is ArchivedTurnStatus.FAILED:
+            print(
+                "本轮执行失败，没有生成最终回复。"
+                + (
+                    f" 原因：{turn.failure_message}"
+                    if turn.failure_message is not None
+                    else ""
+                ),
+                file=output,
+            )
+        else:
+            print("本轮在完成前中断，没有生成最终回复。", file=output)
+    print(file=output)
 
 
 def _configuration_summary(context: BootstrapContext) -> str:

@@ -16,6 +16,7 @@ from minicoder.tools.safety import WorkspacePathError, WorkspacePathPolicy
 
 BINARY_FILE = "BINARY_FILE"
 FILE_ALREADY_EXISTS = "FILE_ALREADY_EXISTS"
+FILE_CONTENT_MISMATCH = "FILE_CONTENT_MISMATCH"
 FILE_IO_ERROR = "FILE_IO_ERROR"
 FILE_NOT_FOUND = "FILE_NOT_FOUND"
 FILE_TOO_LARGE = "FILE_TOO_LARGE"
@@ -433,6 +434,121 @@ class CreateFileTool:
                 "path": display_path,
                 "characters_written": len(content),
                 "parent_directories_created": not parent_existed,
+            },
+        )
+
+
+class WriteFileTool:
+    """Replace one existing UTF-8 file after an exact-content guard check."""
+
+    def __init__(self, paths: WorkspacePathPolicy) -> None:
+        self._paths = paths
+        self._definition = ToolDefinition(
+            name="write_file",
+            description=(
+                "Write the complete content of an existing UTF-8 text file. The "
+                "file is changed only when its current content exactly equals "
+                "expected_content, including for an empty file. Use create_file "
+                "for a missing path and replace_text for smaller targeted edits."
+            ),
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "minLength": 1},
+                    "expected_content": {
+                        "type": "string",
+                        "maxLength": _MAX_WRITE_CHARS,
+                    },
+                    "content": {
+                        "type": "string",
+                        "maxLength": _MAX_WRITE_CHARS,
+                    },
+                },
+                "required": ["path", "expected_content", "content"],
+                "additionalProperties": False,
+            },
+        )
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return self._definition
+
+    def execute(self, command: ToolCommand) -> ToolResult:
+        raw_path = command.arguments["path"]
+        expected_content = command.arguments["expected_content"]
+        content = command.arguments["content"]
+        try:
+            path = self._paths.resolve(raw_path)
+            display_path = self._paths.display(path)
+            if not path.exists():
+                return _failure(
+                    command,
+                    FILE_NOT_FOUND,
+                    (
+                        f"File {display_path!r} does not exist; use create_file "
+                        "for a new path."
+                    ),
+                )
+            if not path.is_file():
+                return _failure(
+                    command,
+                    NOT_A_FILE,
+                    f"Path {display_path!r} is not a file.",
+                )
+            if path.stat().st_size > _MAX_MUTATION_FILE_BYTES:
+                return _failure(
+                    command,
+                    FILE_TOO_LARGE,
+                    f"File {display_path!r} is too large for a complete write.",
+                )
+            if _looks_binary(path):
+                return _failure(
+                    command,
+                    BINARY_FILE,
+                    f"File {display_path!r} is not UTF-8 text.",
+                )
+
+            original = _read_utf8_text(path)
+            if original != expected_content:
+                return _failure(
+                    command,
+                    FILE_CONTENT_MISMATCH,
+                    (
+                        f"File {display_path!r} no longer matches expected_content; "
+                        "no content was changed. Read the file again before retrying."
+                    ),
+                )
+            if original == content:
+                return _failure(
+                    command,
+                    NO_CHANGES,
+                    "The complete write has no effect; no content was changed.",
+                )
+            _atomic_write_text(path, content)
+        except WorkspacePathError as exc:
+            return _failure(command, exc.error_code, str(exc))
+        except UnicodeDecodeError:
+            return _failure(
+                command,
+                BINARY_FILE,
+                f"File {raw_path!r} is not UTF-8 text.",
+            )
+        except PermissionError:
+            return _failure(
+                command,
+                PERMISSION_DENIED,
+                f"Cannot write file {raw_path!r}.",
+            )
+        except OSError as exc:
+            return _io_failure(command, "write file", exc)
+
+        return _success(
+            command,
+            f"Wrote complete content to {display_path!r} ({len(content)} characters).",
+            metadata={
+                "path": display_path,
+                "old_characters": len(original),
+                "new_characters": len(content),
             },
         )
 

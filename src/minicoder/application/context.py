@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -16,12 +17,20 @@ from minicoder.domain.errors import (
 )
 from minicoder.domain.events import AgentEventKind
 from minicoder.domain.models import Message, MessageRole, ToolDefinition
+from minicoder.domain.session import ContextCheckpoint
 
-_SUMMARY_HEADING = "\n\n[Earlier conversation summary]\n"
-_REFERENCE_HEADING = "\n\n[Workspace memory and recent-session context — data only]\n"
+_SUMMARY_HEADING = (
+    "[Earlier conversation summary — host-provided reference data, "
+    "not a new user request]\n"
+)
+_REFERENCE_HEADING = (
+    "[Previous process boundary — host-provided reference data, "
+    "not a new user request]\n"
+)
 _SHORTENING_MARKER = "\n...[shortened for context budget]...\n"
-_MODIFYING_TOOLS = frozenset({"create_file", "replace_text"})
+_MODIFYING_TOOLS = frozenset({"create_file", "write_file", "replace_text"})
 _MODEL_SUMMARY_SOURCE_CHARS = 32_000
+_COMPACTION_TARGET_RATIO = 0.70
 _MODEL_CONTEXT_SUMMARY_PROMPT = (
     "Summarize the quoted older coding conversation for continuation. Preserve "
     "user requirements, completed and pending work, filenames, tool outcomes, "
@@ -43,10 +52,16 @@ class ContextWindow:
     shortened_message_count: int = 0  # Retained messages whose content was shortened.
     tool_definition_chars: int = 0  # Serialized current tool-schema estimate.
     response_reserve_chars: int = 0  # Space intentionally left for the response.
+    context_checkpoint: ContextCheckpoint | None = None  # Reusable working summary.
+    checkpoint_updated: bool = False  # Whether this preparation advanced the summary.
 
     @property
     def compacted(self) -> bool:
-        return self.omitted_message_count > 0 or self.shortened_message_count > 0
+        return (
+            self.omitted_message_count > 0
+            or self.shortened_message_count > 0
+            or self.checkpoint_updated
+        )
 
     @property
     def budget_exceeded(self) -> bool:
@@ -221,7 +236,43 @@ class ModelContextSummary:
                     error_type=None,
                     model_step=model_step,
                 )
-        source = _shorten_text(_model_summary_source(messages), source_limit)
+        source = _model_summary_source(messages)
+        if len(source) > source_limit:
+            intermediate_limit = min(
+                max_chars,
+                max(1, source_limit // 4),
+            )
+            while len(source) > source_limit:
+                summaries: list[str] = []
+                for start in range(0, len(source), source_limit):
+                    chunk = source[start : start + source_limit]
+                    summaries.append(
+                        self._summarize_source_once(
+                            chunk,
+                            max_chars=intermediate_limit,
+                            omitted_message_count=len(messages),
+                            turn_index=turn_index,
+                            model_step=model_step,
+                        )
+                    )
+                source = "\n".join(summaries)
+        return self._summarize_source_once(
+            source,
+            max_chars=max_chars,
+            omitted_message_count=len(messages),
+            turn_index=turn_index,
+            model_step=model_step,
+        )
+
+    def _summarize_source_once(
+        self,
+        source: str,
+        *,
+        max_chars: int,
+        omitted_message_count: int,
+        turn_index: int,
+        model_step: int,
+    ) -> str:
         request = _context_summary_request(source, max_chars=max_chars)
         if (
             self._request_input_budget_chars is not None
@@ -229,7 +280,7 @@ class ModelContextSummary:
             > self._request_input_budget_chars
         ):
             return self._fallback_summary(
-                messages,
+                (Message(role=MessageRole.USER, content=source),),
                 max_chars=max_chars,
                 reason="summary_request_budget_too_small",
                 error_type=None,
@@ -240,7 +291,7 @@ class ModelContextSummary:
             model_step=model_step,
             details={
                 "source_chars": len(source),
-                "omitted_message_count": len(messages),
+                "omitted_message_count": omitted_message_count,
             },
         )
         self._archive_safely(
@@ -260,7 +311,7 @@ class ModelContextSummary:
             turn = self._model.complete(messages=request, tools=())
         except ModelError as exc:
             return self._fallback_summary(
-                messages,
+                (Message(role=MessageRole.USER, content=source),),
                 max_chars=max_chars,
                 reason="model_error",
                 error_type=type(exc).__name__,
@@ -280,7 +331,7 @@ class ModelContextSummary:
         )
         if turn.tool_calls or turn.content is None or not turn.content.strip():
             return self._fallback_summary(
-                messages,
+                (Message(role=MessageRole.USER, content=source),),
                 max_chars=max_chars,
                 reason="invalid_summary_response",
                 error_type=None,
@@ -368,6 +419,9 @@ class ContextManager:
         budget_chars: int,
         response_reserve_chars: int = 0,
         summary_strategy: ContextSummaryStrategy | None = None,
+        initial_checkpoint: ContextCheckpoint | None = None,
+        archive: SessionArchivePort | None = None,
+        events: EventBus | None = None,
     ) -> None:
         if (
             not isinstance(budget_chars, int)
@@ -393,6 +447,16 @@ class ContextManager:
             if summary_strategy is None
             else summary_strategy
         )
+        if initial_checkpoint is not None and not isinstance(
+            initial_checkpoint,
+            ContextCheckpoint,
+        ):
+            raise DomainValidationError(
+                "context initial_checkpoint must be ContextCheckpoint or None"
+            )
+        self._checkpoint = initial_checkpoint
+        self._archive = archive
+        self._events = EventBus() if events is None else events
 
     @property
     def budget_chars(self) -> int:
@@ -402,10 +466,17 @@ class ContextManager:
     def response_reserve_chars(self) -> int:
         return self._response_reserve_chars
 
+    @property
+    def checkpoint(self) -> ContextCheckpoint | None:
+        """Return the latest reusable summary checkpoint."""
+
+        return self._checkpoint
+
     def prepare(
         self,
         messages: Sequence[Message],
         *,
+        system: Message | None = None,
         current_user_index: int | None = None,
         reference_context: str = "",
         tools: Sequence[ToolDefinition] = (),
@@ -421,15 +492,27 @@ class ContextManager:
                 "context tools must contain ToolDefinition values"
             )
         original = tuple(messages)
-        if len(original) < 2:
+        # The explicit form is used by AgentEngine: persistent history contains no
+        # System message. The legacy embedded form remains accepted so callers can
+        # migrate without changing a saved archive atomically.
+        if system is None:
+            if len(original) < 2 or original[0].role is not MessageRole.SYSTEM:
+                raise DomainValidationError(
+                    "context requires a System message and a user task"
+                )
+            system = original[0]
+            original = original[1:]
+            if current_user_index is not None:
+                current_user_index -= 1
+        elif not isinstance(system, Message) or system.role is not MessageRole.SYSTEM:
             raise DomainValidationError(
-                "context requires an initial system message and user task"
+                "context system must be a Message with the system role"
             )
-        if original[0].role is not MessageRole.SYSTEM:
-            raise DomainValidationError("context first message must be system")
-        if any(message.role is MessageRole.SYSTEM for message in original[1:]):
+        if not original:
+            raise DomainValidationError("context requires a user task")
+        if any(message.role is MessageRole.SYSTEM for message in original):
             raise DomainValidationError(
-                "context may contain only one system message"
+                "context history must not contain system messages"
             )
 
         if current_user_index is None:
@@ -444,7 +527,7 @@ class ContextManager:
         if (
             not isinstance(current_user_index, int)
             or isinstance(current_user_index, bool)
-            or current_user_index <= 0
+            or current_user_index < 0
             or current_user_index >= len(original)
             or original[current_user_index].role is not MessageRole.USER
         ):
@@ -452,9 +535,29 @@ class ContextManager:
                 "context current_user_index must identify a user message"
             )
 
+        checkpoint = self._validated_checkpoint(original)
+        covered_message_count = (
+            0 if checkpoint is None else checkpoint.covered_message_count
+        )
+        reference_messages = _reference_messages(reference_context)
+        current_user = original[current_user_index]
+        exact_before_current = (
+            original[covered_message_count:current_user_index]
+            if covered_message_count < current_user_index
+            else ()
+        )
+        exact_after_current = original[
+            max(covered_message_count, current_user_index + 1) :
+        ]
         model_original = (
-            _with_reference(original[0], reference_context),
-            *original[1:],
+            system,
+            *_summary_messages(
+                "" if checkpoint is None else checkpoint.summary,
+            ),
+            *exact_before_current,
+            *reference_messages,
+            current_user,
+            *exact_after_current,
         )
         tool_chars = tool_definition_char_count(tools)
         message_budget = max(
@@ -472,79 +575,136 @@ class ContextManager:
                 prepared_chars=original_chars,
                 tool_definition_chars=tool_chars,
                 response_reserve_chars=self._response_reserve_chars,
+                context_checkpoint=checkpoint,
             )
 
-        system = model_original[0]
-        current_user = model_original[current_user_index]
-        before_groups = _conversation_groups(model_original[1:current_user_index])
-        after_groups = _conversation_groups(model_original[current_user_index + 1 :])
-        summary_reserve = min(6_000, max(160, message_budget // 5))
+        uncovered_groups = _conversation_groups(
+            original[covered_message_count:]
+        )
+        latest_group_chars = _latest_group_chars_excluding_pinned_index(
+            uncovered_groups,
+            first_message_index=covered_message_count,
+            pinned_message_index=current_user_index,
+        )
+        permanent_chars = conversation_char_count(
+            (system, *reference_messages, current_user)
+        )
+        summary_overhead = (
+            conversation_char_count(_summary_messages("x")) - 1
+        )
+        target_message_budget = min(
+            message_budget,
+            max(
+                int(message_budget * _COMPACTION_TARGET_RATIO),
+                permanent_chars
+                + summary_overhead
+                + latest_group_chars
+                + 160,
+            ),
+        )
+        summary_reserve = min(
+            6_000,
+            max(160, target_message_budget // 5),
+        )
         if self._response_reserve_chars > 0:
             summary_reserve = min(
                 summary_reserve,
                 self._response_reserve_chars,
             )
-        permanent_chars = conversation_char_count((system, current_user))
         summary_reserve = min(
             summary_reserve,
-            max(0, message_budget - permanent_chars - len(_SUMMARY_HEADING)),
+            max(
+                0,
+                target_message_budget
+                - permanent_chars
+                - summary_overhead
+                - latest_group_chars,
+            ),
         )
-        summary_overhead = len(_SUMMARY_HEADING) if summary_reserve else 0
+        if summary_reserve <= 0:
+            return ContextWindow(
+                messages=model_original,
+                budget_chars=self._budget_chars,
+                original_chars=original_chars,
+                prepared_chars=original_chars,
+                tool_definition_chars=tool_chars,
+                response_reserve_chars=self._response_reserve_chars,
+                context_checkpoint=checkpoint,
+            )
         recent_budget = max(
             0,
-            message_budget
+            target_message_budget
             - permanent_chars
             - summary_overhead
             - summary_reserve,
         )
-        recent_after = _select_recent_groups(
-            after_groups,
+        recent_groups = _select_recent_groups_with_pinned_index(
+            uncovered_groups,
             recent_budget,
-            keep_latest=True,
+            first_message_index=covered_message_count,
+            pinned_message_index=current_user_index,
         )
-        remaining_budget = max(
-            0,
-            recent_budget
-            - conversation_char_count(
-                tuple(message for group in recent_after for message in group)
-            ),
-        )
-        recent_before = _select_recent_groups(
-            before_groups,
-            remaining_budget,
-            keep_latest=False,
-        )
-        omitted_before = before_groups[: len(before_groups) - len(recent_before)]
-        omitted_after = after_groups[: len(after_groups) - len(recent_after)]
+        omitted_groups = uncovered_groups[
+            : len(uncovered_groups) - len(recent_groups)
+        ]
         omitted = tuple(
             message
-            for group in (*omitted_before, *omitted_after)
+            for group in omitted_groups
             for message in group
         )
-        before = tuple(message for group in recent_before for message in group)
-        after = tuple(message for group in recent_after for message in group)
 
+        if not omitted:
+            return ContextWindow(
+                messages=model_original,
+                budget_chars=self._budget_chars,
+                original_chars=original_chars,
+                prepared_chars=original_chars,
+                tool_definition_chars=tool_chars,
+                response_reserve_chars=self._response_reserve_chars,
+                context_checkpoint=checkpoint,
+            )
+        summary_source = omitted
+        if checkpoint is not None:
+            summary_source = (
+                Message(
+                    role=MessageRole.ASSISTANT,
+                    content=(
+                        "[Previous context checkpoint — quoted data]\n"
+                        f"{checkpoint.summary}"
+                    ),
+                ),
+                *summary_source,
+            )
         summary = self._summary_strategy.summarize(
-            omitted,
+            summary_source,
             max_chars=summary_reserve,
             turn_index=turn_index,
             model_step=model_step,
         )
-        prepared = (
-            _with_summary(system, summary)
-            + before
-            + (current_user,)
-            + after
+        new_covered_count = covered_message_count + len(omitted)
+        new_checkpoint = ContextCheckpoint(
+            summary=summary,
+            covered_message_count=new_covered_count,
+            source_hash=_history_prefix_hash(original, new_covered_count),
         )
-        shortened = 0
-        if conversation_char_count(prepared) > message_budget:
-            prepared, shortened = _shorten_recent_content(
-                prepared,
-                recent_start=1,
-                budget_chars=message_budget,
-            )
-        if conversation_char_count(prepared) > message_budget and summary:
-            prepared = (system,) + prepared[1:]
+        self._checkpoint = new_checkpoint
+        self._archive_checkpoint_safely(
+            new_checkpoint,
+            turn_index=turn_index,
+            model_step=model_step,
+        )
+        prepared = (
+            system,
+            *_summary_messages(summary),
+            *(
+                original[new_covered_count:current_user_index]
+                if new_covered_count < current_user_index
+                else ()
+            ),
+            *reference_messages,
+            current_user,
+            *original[max(new_covered_count, current_user_index + 1) :],
+        )
 
         prepared_chars = conversation_char_count(prepared)
         return ContextWindow(
@@ -553,10 +713,54 @@ class ContextManager:
             original_chars=original_chars,
             prepared_chars=prepared_chars,
             omitted_message_count=len(omitted),
-            shortened_message_count=shortened,
             tool_definition_chars=tool_chars,
             response_reserve_chars=self._response_reserve_chars,
+            context_checkpoint=new_checkpoint,
+            checkpoint_updated=True,
         )
+
+    def _validated_checkpoint(
+        self,
+        messages: tuple[Message, ...],
+    ) -> ContextCheckpoint | None:
+        checkpoint = self._checkpoint
+        if checkpoint is None:
+            return None
+        if checkpoint.covered_message_count > len(messages):
+            self._checkpoint = None
+            return None
+        if (
+            _history_prefix_hash(messages, checkpoint.covered_message_count)
+            != checkpoint.source_hash
+        ):
+            self._checkpoint = None
+            return None
+        return checkpoint
+
+    def _archive_checkpoint_safely(
+        self,
+        checkpoint: ContextCheckpoint,
+        *,
+        turn_index: int,
+        model_step: int,
+    ) -> None:
+        if self._archive is None:
+            return
+        try:
+            self._archive.record_context_checkpoint(
+                checkpoint=checkpoint,
+                turn_index=turn_index,
+                model_step=model_step,
+            )
+        except SessionPersistenceError as exc:
+            self._events.publish(
+                AgentEventKind.SESSION_ARCHIVE_FAILED,
+                model_step=model_step,
+                details={
+                    "operation": "record_context_checkpoint",
+                    "error_type": type(exc).__name__,
+                },
+            )
 
 
 def conversation_char_count(messages: Sequence[Message]) -> int:
@@ -592,6 +796,34 @@ def _message_char_count(message: Message) -> int:
     return total
 
 
+def _history_prefix_hash(messages: Sequence[Message], count: int) -> str:
+    prefix = messages[:count]
+    payload = [
+        {
+            "role": message.role.value,
+            "content": message.content,
+            "tool_calls": [
+                {
+                    "id": call.id,
+                    "name": call.name,
+                    "arguments_json": call.arguments_json,
+                }
+                for call in message.tool_calls
+            ],
+            "tool_call_id": message.tool_call_id,
+            "reasoning_content": message.reasoning_content,
+        }
+        for message in prefix
+    ]
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def _conversation_groups(
     messages: Sequence[Message],
 ) -> tuple[tuple[Message, ...], ...]:
@@ -609,50 +841,97 @@ def _conversation_groups(
     return tuple(groups)
 
 
-def _select_recent_groups(
+def _latest_group_chars_excluding_pinned_index(
+    groups: Sequence[tuple[Message, ...]],
+    *,
+    first_message_index: int,
+    pinned_message_index: int,
+) -> int:
+    if not groups:
+        return 0
+    latest = groups[-1]
+    latest_start = first_message_index + sum(
+        len(group) for group in groups[:-1]
+    )
+    return _group_chars_excluding_pinned_index(
+        latest,
+        group_start=latest_start,
+        pinned_message_index=pinned_message_index,
+    )
+
+
+def _group_chars_excluding_pinned_index(
+    group: tuple[Message, ...],
+    *,
+    group_start: int,
+    pinned_message_index: int,
+) -> int:
+    group_chars = conversation_char_count(group)
+    group_end = group_start + len(group)
+    if group_start <= pinned_message_index < group_end:
+        group_chars -= _message_char_count(
+            group[pinned_message_index - group_start]
+        )
+    return group_chars
+
+
+def _select_recent_groups_with_pinned_index(
     groups: Sequence[tuple[Message, ...]],
     budget_chars: int,
     *,
-    keep_latest: bool = True,
+    first_message_index: int,
+    pinned_message_index: int,
 ) -> tuple[tuple[Message, ...], ...]:
+    """Keep a recent complete suffix while budgeting one pinned message separately."""
+
     if not groups:
         return ()
+    indexed: list[tuple[tuple[Message, ...], int]] = []
+    cursor = first_message_index
+    for group in groups:
+        group_chars = _group_chars_excluding_pinned_index(
+            group,
+            group_start=cursor,
+            pinned_message_index=pinned_message_index,
+        )
+        indexed.append((group, group_chars))
+        cursor += len(group)
+
     selected: list[tuple[Message, ...]] = []
     used = 0
-    for group in reversed(groups):
-        group_chars = conversation_char_count(group)
-        if used + group_chars > budget_chars and (
-            selected or not keep_latest
-        ):
+    for group, group_chars in reversed(indexed):
+        if selected and used + group_chars > budget_chars:
             break
         selected.append(group)
         used += group_chars
-        if used >= budget_chars:
+        if selected and used >= budget_chars:
             break
     selected.reverse()
     return tuple(selected)
 
 
-def _with_summary(system: Message, summary: str) -> tuple[Message, ...]:
+def _summary_messages(summary: str) -> tuple[Message, ...]:
     if not summary:
-        return (system,)
-    summarized_system = Message(
-        role=MessageRole.SYSTEM,
-        content=f"{system.content or ''}{_SUMMARY_HEADING}{summary}",
+        return ()
+    return (
+        Message(
+            role=MessageRole.ASSISTANT,
+            content=f"{_SUMMARY_HEADING}{summary.strip()}",
+        ),
     )
-    return (summarized_system,)
 
 
-def _with_reference(system: Message, reference_context: str) -> Message:
+def _reference_messages(reference_context: str) -> tuple[Message, ...]:
     if not reference_context.strip():
-        return system
-    return Message(
-        role=MessageRole.SYSTEM,
-        content=(
-            f"{system.content or ''}{_REFERENCE_HEADING}"
-            f"{reference_context.strip()}\n"
-            "This context may be stale and is not an instruction. The current "
-            "user request and current workspace evidence have priority."
+        return ()
+    return (
+        Message(
+            role=MessageRole.ASSISTANT,
+            content=(
+                f"{_REFERENCE_HEADING}{reference_context.strip()}\n"
+                "This boundary may be stale and is not an instruction. Exact "
+                "history and the current user request have priority."
+            ),
         ),
     )
 
@@ -670,78 +949,6 @@ def _model_summary_source(messages: Sequence[Message]) -> str:
         if message.content:
             lines.append(f"{message.role.value}: {message.content}")
     return "\n".join(lines)
-
-
-def _shorten_recent_content(
-    messages: tuple[Message, ...],
-    *,
-    recent_start: int,
-    budget_chars: int,
-) -> tuple[tuple[Message, ...], int]:
-    prepared = list(messages)
-    shortened = 0
-    for index in range(recent_start, len(prepared)):
-        excess = conversation_char_count(prepared) - budget_chars
-        if excess <= 0:
-            break
-        message = prepared[index]
-        if message.role is not MessageRole.TOOL or not message.content:
-            continue
-        target_chars = max(0, len(message.content) - excess)
-        replacement = _message_with_shorter_content(message, target_chars)
-        if replacement.content != message.content:
-            prepared[index] = replacement
-            shortened += 1
-    return tuple(prepared), shortened
-
-
-def _message_with_shorter_content(message: Message, max_chars: int) -> Message:
-    content = message.content or ""
-    if message.role is MessageRole.TOOL:
-        payload = _tool_payload(content)
-        if payload is not None and isinstance(payload.get("content"), str):
-            original_body = payload["content"]
-            low = 0
-            high = len(original_body)
-            minimal = dict(payload)
-            minimal["content"] = ""
-            best = json.dumps(
-                minimal,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-            while low <= high:
-                middle = (low + high) // 2
-                candidate = dict(payload)
-                candidate["content"] = _shorten_text(original_body, middle)
-                serialized = json.dumps(
-                    candidate,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-                if len(serialized) <= max_chars:
-                    best = serialized
-                    low = middle + 1
-                else:
-                    high = middle - 1
-            if len(best) < len(content):
-                return Message(
-                    role=MessageRole.TOOL,
-                    content=best,
-                    tool_call_id=message.tool_call_id,
-                )
-            return message
-
-    shortened = _shorten_text(content, max_chars)
-    if shortened == content:
-        return message
-    return Message(
-        role=message.role,
-        content=shortened,
-        tool_calls=message.tool_calls,
-        tool_call_id=message.tool_call_id,
-        reasoning_content=message.reasoning_content,
-    )
 
 
 def _tool_payload(content: str | None) -> dict[str, Any] | None:

@@ -6,9 +6,26 @@ import pytest
 
 from minicoder.bootstrap import ApplicationFactory
 from minicoder.cli import main
+from minicoder.adapters.jsonl_session import JsonlSessionArchive
 from minicoder.domain.errors import ModelConnectionError
-from minicoder.domain.models import AssistantTurn, MessageRole
+from minicoder.domain.models import AssistantTurn, Message, MessageRole, ToolCall
+from minicoder.domain.state import AgentPhase, AgentRunResult, AgentStopReason
 from tests.fakes import FakeModelAdapter
+
+
+def _finish_plan_step(step: int, *, suffix: str = "") -> AssistantTurn:
+    return AssistantTurn(
+        content=None,
+        tool_calls=(
+            ToolCall(
+                id=f"call-finish-{step}{suffix}",
+                name="finish_plan_step",
+                arguments_json=json.dumps(
+                    {"step": step, "summary": f"Step {step} completed."}
+                ),
+            ),
+        ),
+    )
 
 
 def test_check_config_prints_safe_summary(tmp_path: Path) -> None:
@@ -109,7 +126,11 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
 ) -> None:
     model = FakeModelAdapter(
         [
-            AssistantTurn(content="1. Inspect the project.\n2. Report the result."),
+            AssistantTurn(
+                content="Plan:\n1. Inspect the project.\n2. Report the result."
+            ),
+            _finish_plan_step(1),
+            _finish_plan_step(2),
             AssistantTurn(content="Task completed safely."),
         ]
     )
@@ -152,9 +173,12 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
         "[进行中] 1/2 Inspect the project.",
         "[分析] 正在请求模型（第 2 次）",
         "[已完成] 1/2 Inspect the project.",
-        "[未关联] 计划 2/2 没有对应到独立的工具操作；不推测其具体完成时间",
-        "[计划] 任务已完成，计划进度结束（共 2 项，1 项未单独关联工具操作）",
-        "[完成] 任务已完成（共 2 次模型调用）",
+        "[进行中] 2/2 Report the result.",
+        "[分析] 正在请求模型（第 3 次）",
+        "[分析] 正在请求模型（第 4 次）",
+        "[已完成] 2/2 Report the result.",
+        "[计划] 全部 2 项已完成",
+        "[完成] 任务已完成（共 4 次模型调用）",
         "Task completed safely.",
     ]
     assert stderr.getvalue() == ""
@@ -171,7 +195,10 @@ def test_cli_runs_one_task_with_console_events_and_jsonl_trace(
         "plan_step_started",
         "model_requested",
         "plan_step_completed",
-        "plan_steps_untracked",
+        "plan_step_started",
+        "model_requested",
+        "model_requested",
+        "plan_step_completed",
         "plan_completed",
         "task_completed",
     ]
@@ -183,12 +210,20 @@ def test_cli_without_a_task_runs_an_interactive_multi_turn_session(
 ) -> None:
     model = FakeModelAdapter(
         [
-            AssistantTurn(content="1. Inspect project metadata.\n2. Answer."),
+            AssistantTurn(
+                content="Plan:\n1. Inspect project metadata.\n2. Answer."
+            ),
+            _finish_plan_step(1, suffix="-first"),
+            _finish_plan_step(2, suffix="-first"),
             AssistantTurn(
                 content="The project uses Python.",
                 reasoning_content="first turn state",
             ),
-            AssistantTurn(content="1. Reuse the prior context.\n2. Answer."),
+            AssistantTurn(
+                content="Plan:\n1. Reuse the prior context.\n2. Answer."
+            ),
+            _finish_plan_step(1, suffix="-second"),
+            _finish_plan_step(2, suffix="-second"),
             AssistantTurn(content="It requires Python 3.11."),
         ]
     )
@@ -224,17 +259,92 @@ def test_cli_without_a_task_runs_an_interactive_multi_turn_session(
     assert "It requires Python 3.11." in stdout.getvalue()
     assert stdout.getvalue().count("[开始]") == 2
     assert stderr.getvalue() == ""
-    second_request = model.requests[3].messages
-    assert [message.role for message in second_request[-4:]] == [
-        MessageRole.ASSISTANT,
-        MessageRole.USER,
-        MessageRole.ASSISTANT,
-        MessageRole.USER,
-    ]
-    assert second_request[-4].reasoning_content == "first turn state"
-    assert "What is the minimum version?" in (
-        second_request[-3].content or ""
+    second_request = model.requests[4].messages
+    assert any(
+        message.reasoning_content == "first turn state"
+        for message in second_request
+        if message.role is MessageRole.ASSISTANT
     )
+    assert "What is the minimum version?" in (
+        second_request[-1].content or ""
+    )
+
+
+def test_cli_replays_complete_project_dialogue_before_the_new_prompt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_root = tmp_path / "session-store"
+    previous = JsonlSessionArchive(
+        workspace=tmp_path,
+        storage_root=archive_root,
+    )
+    messages = (
+        Message(role=MessageRole.SYSTEM, content="hidden system prompt"),
+        Message(role=MessageRole.USER, content="augmented internal user message"),
+        Message(role=MessageRole.ASSISTANT, content="hidden planning response"),
+    )
+    previous.record_turn_started(
+        task="请介绍这个项目",
+        history=(),
+        turn_index=1,
+    )
+    previous.record_turn_result(
+        task="请介绍这个项目",
+        result=AgentRunResult(
+            phase=AgentPhase.COMPLETE,
+            stop_reason=AgentStopReason.FINAL_RESPONSE,
+            model_steps=2,
+            messages=messages,
+            final_response="这是一个 **Python** 项目。",
+        ),
+        turn_index=1,
+    )
+    previous.close()
+
+    monkeypatch.setattr(
+        ApplicationFactory,
+        "create_model_adapter",
+        lambda config: FakeModelAdapter([]),
+    )
+    monkeypatch.setattr(
+        ApplicationFactory,
+        "create_session_archive",
+        lambda config: JsonlSessionArchive(
+            workspace=tmp_path,
+            storage_root=archive_root,
+        ),
+    )
+    stdout = StringIO()
+
+    exit_code = main(
+        ["--workspace", str(tmp_path)],
+        environ={
+            "MINICODER_API_KEY": "not-used",
+            "MINICODER_BASE_URL": "https://models.example.com/v1",
+            "MINICODER_MODEL": "test-model",
+            "MINICODER_MEMORY_ENABLED": "false",
+        },
+        stdin=StringIO("/exit\n"),
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    rendered = stdout.getvalue()
+    assert exit_code == 0
+    assert "你：\n请介绍这个项目" in rendered
+    assert "MiniCoder：" in rendered
+    assert "请介绍这个项目" in rendered
+    assert "这是一个 Python 项目。" in rendered
+    assert "hidden system prompt" not in rendered
+    assert "hidden planning response" not in rendered
+    assert "[历史" not in rendered
+    assert "回放结束" not in rendered
+    recovery_message = (
+        "[上下文] 已从最近的会话档案恢复连续对话上下文（状态：complete）"
+    )
+    assert rendered.index("你：") < rendered.index(recovery_message)
+    assert rendered.index(recovery_message) < rendered.index("MiniCoder 交互模式")
 
 
 def test_interactive_cli_exits_cleanly_on_eof_without_calling_the_model(
@@ -368,7 +478,8 @@ def test_cli_renders_model_markdown_instead_of_printing_fence_markers(
 ) -> None:
     model = FakeModelAdapter(
         [
-            AssistantTurn(content="1. Explain the input format."),
+            AssistantTurn(content="Plan:\n1. Explain the input format."),
+            _finish_plan_step(1, suffix="-markdown"),
             AssistantTurn(
                 content=(
                     "输入格式：\n\n"

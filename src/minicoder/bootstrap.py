@@ -27,8 +27,8 @@ from minicoder.application.completion import (
 from minicoder.application.context import ContextManager, ModelContextSummary
 from minicoder.application.event_bus import EventBus, EventDeliveryFailure
 from minicoder.application.memory import (
-    ModelTurnMemoryMaintainer,
-    TurnMemoryMaintainer,
+    LongTermMemoryMaintainer,
+    ModelLongTermMemoryMaintainer,
 )
 from minicoder.application.ports import (
     EventSinkPort,
@@ -47,7 +47,7 @@ from minicoder.application.verification import (
     ConfiguredVerificationCommand,
 )
 from minicoder.config import AppConfig
-from minicoder.application.session_context import format_recent_session_context
+from minicoder.application.session_context import format_recent_session_boundary
 from minicoder.domain.errors import (
     MemoryPersistenceError,
     SessionPersistenceError,
@@ -55,7 +55,11 @@ from minicoder.domain.errors import (
 from minicoder.domain.events import AgentEventKind
 from minicoder.domain.memory import ProjectMemoryRecord
 from minicoder.domain.models import Message
-from minicoder.domain.session import RecentSessionContext
+from minicoder.domain.session import (
+    ArchivedDialogueTurn,
+    ContextCheckpoint,
+    RecentSessionContext,
+)
 from minicoder.domain.state import AgentRunResult
 from minicoder.platforms import OperatingSystem, detect_operating_system
 from minicoder.tools.command_safety import CommandSafetyPolicy
@@ -65,6 +69,7 @@ from minicoder.tools.files import (
     ReadFileTool,
     ReplaceTextTool,
     SearchTextTool,
+    WriteFileTool,
 )
 from minicoder.tools.output import (
     OutputCompactionStrategy,
@@ -97,10 +102,11 @@ class AgentSession:
         artifacts: ToolOutputArtifactStore,
         events: EventBus,
         memory_store: ProjectMemoryPort | None = None,
-        memory_maintainer: TurnMemoryMaintainer | None = None,
+        memory_maintainer: LongTermMemoryMaintainer | None = None,
         initial_memory: Sequence[ProjectMemoryRecord] = (),
         archive: SessionArchivePort | None = None,
         recent_session_context: RecentSessionContext | None = None,
+        dialogue_history: Sequence[ArchivedDialogueTurn] = (),
     ) -> None:
         self._engine = engine
         self._artifacts = artifacts
@@ -109,10 +115,13 @@ class AgentSession:
         self._memory_maintainer = memory_maintainer
         self._project_memory = list(initial_memory)
         self._archive = archive
-        self._rolling_context = format_recent_session_context(
+        self._recovery_context = format_recent_session_boundary(
             recent_session_context
         )
-        self._history: tuple[Message, ...] = ()
+        self._history = (
+            () if recent_session_context is None else recent_session_context.messages
+        )
+        self._dialogue_history = tuple(dialogue_history)
         self._turn_index = 0
         self._closed = False
 
@@ -128,15 +137,15 @@ class AgentSession:
 
     @property
     def history(self) -> tuple[Message, ...]:
-        """Return the immutable full conversation accumulated so far."""
+        """Return exact User/Assistant/Tool history without a System message."""
 
         return self._history
 
     @property
-    def rolling_context(self) -> str:
-        """Return the latest model-maintained session summary."""
+    def dialogue_history(self) -> tuple[ArchivedDialogueTurn, ...]:
+        """Return exact external turns recovered from earlier processes."""
 
-        return self._rolling_context
+        return self._dialogue_history
 
     def submit(self, user_message: str) -> AgentRunResult:
         """Run one user turn without closing the shared session resources."""
@@ -149,6 +158,7 @@ class AgentSession:
             "record_turn_started",
             lambda: self._archive.record_turn_started(
                 task=user_message,
+                history=self._history,
                 turn_index=turn_index,
             )
             if self._archive is not None
@@ -160,9 +170,10 @@ class AgentSession:
             user_message,
             history=self._history,
             project_memory=tuple(self._project_memory),
-            reference_context=self._rolling_context,
+            reference_context=self._recovery_context,
             turn_index=turn_index,
         )
+        self._recovery_context = ""
         self._history = result.messages
         self._archive_safely(
             "record_turn_result",
@@ -180,16 +191,13 @@ class AgentSession:
                 task=user_message,
                 result=result,
                 turn_messages=result.messages[previous_message_count:],
-                previous_context=self._rolling_context or None,
                 project_memory=tuple(self._project_memory),
                 model_step=result.model_steps,
                 turn_index=turn_index,
             )
-            self._rolling_context = decision.context_summary
             self._archive_safely(
                 "record_maintenance",
                 lambda: self._archive.record_maintenance(
-                    context_summary=decision.context_summary,
                     memory_summary=decision.memory_summary,
                     used_fallback=decision.used_fallback,
                     turn_index=turn_index,
@@ -253,11 +261,22 @@ class AgentSession:
         if self._closed:
             return
         self._closed = True
+        checkpoint = self._engine.context_checkpoint
+        if checkpoint is not None:
+            self._archive_safely(
+                "record_context_checkpoint",
+                lambda: self._archive.record_context_checkpoint(
+                    checkpoint=checkpoint,
+                    turn_index=self._turn_index,
+                    model_step=0,
+                )
+                if self._archive is not None
+                else None,
+                model_step=0,
+            )
         self._archive_safely(
             "close",
-            lambda: self._archive.close(
-                context_summary=self._rolling_context or None,
-            )
+            lambda: self._archive.close()
             if self._archive is not None
             else None,
             model_step=0,
@@ -341,12 +360,16 @@ class ApplicationFactory:
         model: ModelPort,
         events: EventBus,
         archive: SessionArchivePort | None = None,
+        initial_checkpoint: ContextCheckpoint | None = None,
     ) -> ContextManager:
         """Create total-request budgeting with model-based semantic compaction."""
 
         return ContextManager(
             budget_chars=config.context_budget_chars,
             response_reserve_chars=config.context_response_reserve_chars,
+            initial_checkpoint=initial_checkpoint,
+            archive=archive,
+            events=events,
             summary_strategy=ModelContextSummary(
                 model=model,
                 events=events,
@@ -409,8 +432,8 @@ class ApplicationFactory:
         model: ModelPort,
         events: EventBus,
         archive: SessionArchivePort | None,
-    ) -> TurnMemoryMaintainer:
-        """Create one post-turn context and long-term-memory decision service."""
+    ) -> LongTermMemoryMaintainer:
+        """Create one selective post-turn long-term-memory decision service."""
 
         source_budget = max(
             1_024,
@@ -420,37 +443,29 @@ class ApplicationFactory:
         )
         task_chars = min(2_000, max(128, source_budget // 12))
         outcome_chars = min(4_000, max(256, source_budget // 6))
-        previous_chars = min(18_000, max(256, source_budget // 6))
         transcript_chars = max(
             256,
             min(
                 120_000,
                 source_budget
                 - task_chars
-                - outcome_chars
-                - (2 * previous_chars),
+                - outcome_chars,
             ),
         )
         maintenance_payload_chars = max(
             128,
             config.context_response_reserve_chars - 256,
         )
-        return ModelTurnMemoryMaintainer(
+        return ModelLongTermMemoryMaintainer(
             model=model,
             events=events,
             sensitive_values=(config.api_key,),
-            allow_long_term_memory=config.memory_enabled,
             task_input_chars=task_chars,
             outcome_input_chars=outcome_chars,
             transcript_input_chars=transcript_chars,
-            previous_context_chars=previous_chars,
-            context_summary_chars=min(
-                6_000,
-                max(64, maintenance_payload_chars * 4 // 5),
-            ),
             memory_summary_chars=min(
                 1_200,
-                max(32, maintenance_payload_chars // 5),
+                max(32, maintenance_payload_chars),
             ),
             request_input_budget_chars=(
                 config.context_budget_chars
@@ -475,6 +490,7 @@ class ApplicationFactory:
                 ReadFileTool(paths, max_chars=config.max_tool_output_chars),
                 SearchTextTool(paths),
                 CreateFileTool(paths),
+                WriteFileTool(paths),
                 ReplaceTextTool(paths),
                 RunCommandTool(
                     processes=processes,
@@ -518,6 +534,7 @@ class ApplicationFactory:
         events = EventBus(event_sinks)
         active_archive: SessionArchivePort | None = None
         recent_session_context: RecentSessionContext | None = None
+        dialogue_history: tuple[ArchivedDialogueTurn, ...] = ()
         if config.session_archive_enabled:
             try:
                 active_archive = (
@@ -526,6 +543,7 @@ class ApplicationFactory:
                     else session_archive
                 )
                 recent_session_context = active_archive.load_latest_context()
+                dialogue_history = tuple(active_archive.load_dialogue_history())
             except SessionPersistenceError as exc:
                 events.publish(
                     AgentEventKind.SESSION_ARCHIVE_FAILED,
@@ -546,8 +564,8 @@ class ApplicationFactory:
                             "previous_stop_reason": (
                                 recent_session_context.stop_reason
                             ),
-                            "recent_message_count": len(
-                                recent_session_context.recent_messages
+                            "restored_message_count": len(
+                                recent_session_context.messages
                             ),
                         },
                     )
@@ -560,7 +578,7 @@ class ApplicationFactory:
                     if memory_store is None
                     else memory_store
                 )
-                initial_memory = tuple(active_memory_store.load_recent())
+                initial_memory = tuple(active_memory_store.load_all())
             except MemoryPersistenceError as exc:
                 events.publish(
                     AgentEventKind.MEMORY_OPERATION_FAILED,
@@ -578,8 +596,8 @@ class ApplicationFactory:
                         model_step=0,
                         details={"record_count": len(initial_memory)},
                     )
-        memory_maintainer: TurnMemoryMaintainer | None = None
-        if config.session_archive_enabled or config.memory_enabled:
+        memory_maintainer: LongTermMemoryMaintainer | None = None
+        if config.memory_enabled:
             memory_maintainer = ApplicationFactory.create_memory_maintainer(
                 config,
                 model=model,
@@ -605,6 +623,11 @@ class ApplicationFactory:
                     model=model,
                     events=events,
                     archive=active_archive,
+                    initial_checkpoint=(
+                        None
+                        if recent_session_context is None
+                        else recent_session_context.context_checkpoint
+                    ),
                 ),
                 retries=ApplicationFactory.create_retry_strategy(),
                 completion=ApplicationFactory.create_completion_policy(
@@ -625,4 +648,5 @@ class ApplicationFactory:
             initial_memory=initial_memory,
             archive=active_archive,
             recent_session_context=recent_session_context,
+            dialogue_history=dialogue_history,
         )

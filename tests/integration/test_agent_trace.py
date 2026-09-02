@@ -9,6 +9,21 @@ from minicoder.domain.state import AgentPhase
 from tests.fakes import FakeModelAdapter
 
 
+def _finish_plan_step(step: int) -> AssistantTurn:
+    return AssistantTurn(
+        content=None,
+        tool_calls=(
+            ToolCall(
+                id=f"call-finish-{step}",
+                name="finish_plan_step",
+                arguments_json=json.dumps(
+                    {"step": step, "summary": f"Step {step} completed."}
+                ),
+            ),
+        ),
+    )
+
+
 def test_agent_jsonl_trace_excludes_message_and_tool_bodies(tmp_path: Path) -> None:
     api_key_marker = "api-key-must-not-appear"
     task_marker = "task-body-must-not-appear"
@@ -47,14 +62,18 @@ def test_agent_jsonl_trace_excludes_message_and_tool_bodies(tmp_path: Path) -> N
     model = FakeModelAdapter(
         [
             AssistantTurn(
-                content=f"1. Create the file ({plan_marker}).\n2. Verify it."
+                content=(
+                    f"Plan:\n1. Create the file ({plan_marker}).\n2. Verify it."
+                )
             ),
             AssistantTurn(
                 content=None,
                 tool_calls=(call,),
                 reasoning_content=reasoning_marker,
             ),
+            _finish_plan_step(1),
             AssistantTurn(content=None, tool_calls=(verify_call,)),
+            _finish_plan_step(2),
             AssistantTurn(content=final_marker),
         ]
     )
@@ -80,7 +99,7 @@ def test_agent_jsonl_trace_excludes_message_and_tool_bodies(tmp_path: Path) -> N
     ):
         assert forbidden not in trace_text
     records = [json.loads(line) for line in trace_text.splitlines()]
-    assert [record["sequence"] for record in records] == list(range(1, 19))
+    assert [record["sequence"] for record in records] == list(range(1, 21))
     assert [record["type"] for record in records] == [
         "task_started",
         "planning_started",
@@ -93,9 +112,11 @@ def test_agent_jsonl_trace_excludes_message_and_tool_bodies(tmp_path: Path) -> N
         "model_requested",
         "plan_step_completed",
         "plan_step_started",
+        "model_requested",
         "tool_called",
         "tool_finished",
         "verification_passed",
+        "model_requested",
         "model_requested",
         "plan_step_completed",
         "plan_completed",

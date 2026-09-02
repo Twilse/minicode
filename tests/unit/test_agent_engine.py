@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from minicoder.application.agent_engine import AgentEngine
+from minicoder.application.agent_engine import AgentEngine, DEFAULT_SYSTEM_PROMPT
 from minicoder.application.context import (
     ContextManager,
     conversation_char_count,
@@ -38,6 +38,16 @@ def _definition(name: str = "read_file") -> ToolDefinition:
     )
 
 
+def _finish(step: int, *, call_id: str | None = None) -> ToolCall:
+    return ToolCall(
+        id=call_id or f"call-finish-{step}",
+        name="finish_plan_step",
+        arguments_json=json.dumps(
+            {"step": step, "summary": f"Evidence for step {step}."}
+        ),
+    )
+
+
 def test_engine_completes_after_one_final_model_turn() -> None:
     model = FakeModelAdapter([AssistantTurn(content="Task completed.")])
     tools = FakeToolAdapter(definitions=(_definition(),))
@@ -50,7 +60,6 @@ def test_engine_completes_after_one_final_model_turn() -> None:
     assert result.model_steps == 1
     assert result.final_response == "Task completed."
     assert [message.role for message in result.messages] == [
-        MessageRole.SYSTEM,
         MessageRole.USER,
         MessageRole.ASSISTANT,
     ]
@@ -62,15 +71,18 @@ def test_engine_completes_after_one_final_model_turn() -> None:
 
 def test_engine_plans_without_tools_before_following_the_plan() -> None:
     call = ToolCall(id="call-read", name="read_file", arguments_json="{}")
+    finishes = (_finish(1), _finish(2), _finish(3))
     plan = (
         "1. Inspect the relevant file.\n"
         "2. Make the requested change.\n"
         "3. Run verification."
     )
+    plan_response = f"Plan:\n{plan}"
     model = FakeModelAdapter(
         [
-            AssistantTurn(content=plan),
+            AssistantTurn(content=plan_response),
             AssistantTurn(content=None, tool_calls=(call,)),
+            *(AssistantTurn(content=None, tool_calls=(finish,)) for finish in finishes),
             AssistantTurn(content="Completed according to the adjusted plan."),
         ]
     )
@@ -90,7 +102,7 @@ def test_engine_plans_without_tools_before_following_the_plan() -> None:
     engine = AgentEngine(
         model=model,
         tools=tools,
-        max_steps=3,
+        max_steps=6,
         planning_enabled=True,
         events=EventBus((observed,), run_id="run-planning"),
     )
@@ -98,19 +110,23 @@ def test_engine_plans_without_tools_before_following_the_plan() -> None:
     result = engine.run("Update the parser")
 
     assert result.phase is AgentPhase.COMPLETE
-    assert result.model_steps == 3
+    assert result.model_steps == 6
     assert model.requests[0].tools == ()
-    assert model.requests[1].tools == (_definition(),)
+    assert [definition.name for definition in model.requests[1].tools] == [
+        "read_file",
+        "finish_plan_step",
+    ]
+    control_schema = model.requests[1].tools[-1].parameters_schema
+    assert control_schema["properties"]["step"]["enum"] == [1]
     assert [message.role for message in model.requests[1].messages[-2:]] == [
         MessageRole.ASSISTANT,
         MessageRole.USER,
     ]
-    assert model.requests[1].messages[-2].content == plan
+    assert model.requests[1].messages[-2].content == plan_response
     execution_requirement = model.requests[1].messages[-1].content or ""
-    assert "default execution contract" in execution_requirement
-    assert "adapt the remaining steps" in execution_requirement
-    assert "[plan_step=N]" in execution_requirement
-    assert "never in the final answer" in execution_requirement
+    assert "Execute only the active numbered plan item" in execution_requirement
+    assert "finish_plan_step by itself" in execution_requirement
+    assert "1/3: Inspect the relevant file." in execution_requirement
     planning_requirement = model.requests[0].messages[-1].content or ""
     assert "exactly 1 step for a direct answer" in planning_requirement
     assert "not an outline of the final answer" in planning_requirement
@@ -120,6 +136,13 @@ def test_engine_plans_without_tools_before_following_the_plan() -> None:
     third_request = model.requests[2].messages
     assert third_request[-1].role is MessageRole.TOOL
     assert "FILE_NOT_FOUND" in (third_request[-1].content or "")
+    assert model.requests[3].tools[-1].parameters_schema["properties"]["step"][
+        "enum"
+    ] == [2]
+    assert model.requests[4].tools[-1].parameters_schema["properties"]["step"][
+        "enum"
+    ] == [3]
+    assert model.requests[5].tools == (_definition(),)
     assert tools.calls == [call]
     assert [event.kind for event in observed.events] == [
         AgentEventKind.TASK_STARTED,
@@ -132,7 +155,13 @@ def test_engine_plans_without_tools_before_following_the_plan() -> None:
         AgentEventKind.TOOL_FINISHED,
         AgentEventKind.MODEL_REQUESTED,
         AgentEventKind.PLAN_STEP_COMPLETED,
-        AgentEventKind.PLAN_STEPS_UNTRACKED,
+        AgentEventKind.PLAN_STEP_STARTED,
+        AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.PLAN_STEP_COMPLETED,
+        AgentEventKind.PLAN_STEP_STARTED,
+        AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.MODEL_REQUESTED,
+        AgentEventKind.PLAN_STEP_COMPLETED,
         AgentEventKind.PLAN_COMPLETED,
         AgentEventKind.TASK_COMPLETED,
     ]
@@ -141,19 +170,20 @@ def test_engine_plans_without_tools_before_following_the_plan() -> None:
     assert observed.events[3].details["display_plan"] == plan
     assert observed.events[4].details["plan_step"] == 1
     assert observed.events[5].details["request_kind"] == "execution"
-    assert [
+    progress_events = [
         (event.details["plan_step"], event.kind)
-        for event in observed.events[9:10]
-    ] == [
-        (1, AgentEventKind.PLAN_STEP_COMPLETED),
+        for event in observed.events
+        if event.kind
+        in {AgentEventKind.PLAN_STEP_STARTED, AgentEventKind.PLAN_STEP_COMPLETED}
     ]
-    assert observed.events[10].details == {
-        "first_plan_step": 2,
-        "last_plan_step": 3,
-        "untracked_plan_item_count": 2,
-        "plan_item_count": 3,
-    }
-    assert observed.events[11].details["untracked_plan_item_count"] == 2
+    assert progress_events == [
+        (1, AgentEventKind.PLAN_STEP_STARTED),
+        (1, AgentEventKind.PLAN_STEP_COMPLETED),
+        (2, AgentEventKind.PLAN_STEP_STARTED),
+        (2, AgentEventKind.PLAN_STEP_COMPLETED),
+        (3, AgentEventKind.PLAN_STEP_STARTED),
+        (3, AgentEventKind.PLAN_STEP_COMPLETED),
+    ]
 
 
 def test_engine_removes_reserved_annotations_from_any_final_response() -> None:
@@ -189,26 +219,23 @@ def test_engine_rejects_a_final_response_containing_only_host_annotations() -> N
     assert "reserved host annotations" in (result.failure_message or "")
 
 
-def test_engine_returns_out_of_order_tool_calls_to_the_model_without_execution() -> None:
-    call = ToolCall(
-        id="call-too-early",
-        name="run_command",
-        arguments_json='{"argv":["python","-m","pytest"]}',
-    )
+def test_engine_rejects_a_skipped_plan_report_without_guessing_from_tools() -> None:
+    skipped = _finish(3, call_id="call-skipped")
     model = FakeModelAdapter(
         [
             AssistantTurn(
                 content=(
+                    "Plan:\n"
                     "1. Inspect files.\n"
                     "2. Implement the change.\n"
                     "3. Verify with pytest."
                 )
             ),
-            AssistantTurn(
-                content="[plan_step=3]",
-                tool_calls=(call,),
-            ),
-            AssistantTurn(content="I must inspect the files first."),
+            AssistantTurn(content=None, tool_calls=(skipped,)),
+            AssistantTurn(content=None, tool_calls=(_finish(1),)),
+            AssistantTurn(content=None, tool_calls=(_finish(2),)),
+            AssistantTurn(content=None, tool_calls=(_finish(3),)),
+            AssistantTurn(content="The requested work completed."),
         ]
     )
     tools = FakeToolAdapter(definitions=(_definition("run_command"),))
@@ -216,9 +243,9 @@ def test_engine_returns_out_of_order_tool_calls_to_the_model_without_execution()
     engine = AgentEngine(
         model=model,
         tools=tools,
-        max_steps=3,
+        max_steps=6,
         planning_enabled=True,
-        events=EventBus((observed,), run_id="run-strict-plan"),
+        events=EventBus((observed,), run_id="run-advisory-plan"),
     )
 
     result = engine.run("Update and verify the project")
@@ -227,21 +254,103 @@ def test_engine_returns_out_of_order_tool_calls_to_the_model_without_execution()
     assert tools.calls == []
     feedback = model.requests[2].messages[-1]
     assert feedback.role is MessageRole.TOOL
-    assert "PLAN_STEP_OUT_OF_ORDER" in (feedback.content or "")
-    rejection = next(
-        event
-        for event in observed.events
-        if event.kind is AgentEventKind.PLAN_TOOL_REJECTED
-    )
-    assert rejection.details["expected_plan_step"] == 1
-    assert rejection.details["attempted_plan_step"] == 3
+    payload = json.loads(feedback.content or "")
+    assert payload["ok"] is False
+    assert payload["error_code"] == "PLAN_STEP_MISMATCH"
     assert AgentEventKind.TOOL_CALLED not in {
         event.kind for event in observed.events
     }
 
 
+def test_engine_rejects_final_text_until_every_plan_item_is_reported() -> None:
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(content="Plan:\n1. Inspect.\n2. Report."),
+            AssistantTurn(content="I finished too early."),
+            AssistantTurn(content=None, tool_calls=(_finish(1),)),
+            AssistantTurn(content=None, tool_calls=(_finish(2),)),
+            AssistantTurn(content="Now every item is complete."),
+        ]
+    )
+    observed = MemoryEventSink()
+    engine = AgentEngine(
+        model=model,
+        tools=FakeToolAdapter(),
+        max_steps=5,
+        planning_enabled=True,
+        events=EventBus((observed,), run_id="run-early-plan-answer"),
+    )
+
+    result = engine.run("Inspect and report")
+
+    assert result.phase is AgentPhase.COMPLETE
+    assert result.final_response == "Now every item is complete."
+    correction = model.requests[2].messages[-1]
+    assert correction.role is MessageRole.USER
+    assert "Plan item 1/2 is still active" in (correction.content or "")
+    assert AgentEventKind.PLAN_STEP_REPORT_REQUIRED in {
+        event.kind for event in observed.events
+    }
+
+
+def test_finish_plan_step_must_be_called_without_ordinary_tools() -> None:
+    ordinary = ToolCall(id="call-read-mixed", name="read_file", arguments_json="{}")
+    mixed_finish = _finish(1, call_id="call-finish-mixed")
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(content="Plan:\n1. Inspect.\n2. Report."),
+            AssistantTurn(
+                content=None,
+                tool_calls=(mixed_finish, ordinary),
+            ),
+            AssistantTurn(content=None, tool_calls=(_finish(1),)),
+            AssistantTurn(content=None, tool_calls=(_finish(2),)),
+            AssistantTurn(content="Completed after separate progress reports."),
+        ]
+    )
+    tools = FakeToolAdapter(
+        [
+            ToolResult(
+                call_id=ordinary.id,
+                tool_name=ordinary.name,
+                ok=True,
+                content="inspected",
+            )
+        ],
+        definitions=(_definition(),),
+    )
+    engine = AgentEngine(
+        model=model,
+        tools=tools,
+        max_steps=5,
+        planning_enabled=True,
+    )
+
+    result = engine.run("Inspect and report")
+
+    assert result.phase is AgentPhase.COMPLETE
+    assert tools.calls == [ordinary]
+    mixed_feedback = model.requests[2].messages[-2]
+    payload = json.loads(mixed_feedback.content or "")
+    assert payload["error_code"] == "PLAN_CONTROL_MIXED_CALLS"
+
+
+def test_engine_reserves_finish_plan_step_name_for_host_control() -> None:
+    engine = AgentEngine(
+        model=FakeModelAdapter([]),
+        tools=FakeToolAdapter(definitions=(_definition("finish_plan_step"),)),
+        max_steps=2,
+        planning_enabled=False,
+    )
+
+    with pytest.raises(DomainValidationError, match="reserved by the host"):
+        engine.run("Inspect")
+
+
 def test_engine_counts_planning_against_the_model_step_limit() -> None:
-    model = FakeModelAdapter([AssistantTurn(content="1. Inspect the project.")])
+    model = FakeModelAdapter(
+        [AssistantTurn(content="Plan:\n1. Inspect the project.")]
+    )
     tools = FakeToolAdapter(definitions=(_definition(),))
     engine = AgentEngine(
         model=model,
@@ -280,9 +389,79 @@ def test_engine_rejects_a_tool_call_from_the_planning_phase() -> None:
     assert result.model_steps == 1
     assert tools.calls == []
     assert [message.role for message in result.messages] == [
-        MessageRole.SYSTEM,
         MessageRole.USER,
     ]
+
+
+def test_engine_retries_an_unrecognized_plan_without_exposing_tools() -> None:
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(content="I will inspect the project first."),
+            AssistantTurn(content="方案：\n- 检查项目\n- 回答问题"),
+            AssistantTurn(content=None, tool_calls=(_finish(1),)),
+            AssistantTurn(content=None, tool_calls=(_finish(2),)),
+            AssistantTurn(content="The project has been inspected."),
+        ]
+    )
+    tools = FakeToolAdapter(definitions=(_definition(),))
+    observed = MemoryEventSink()
+    engine = AgentEngine(
+        model=model,
+        tools=tools,
+        max_steps=5,
+        planning_enabled=True,
+        events=EventBus((observed,), run_id="run-plan-retry"),
+    )
+
+    result = engine.run("Inspect the project")
+
+    assert result.phase is AgentPhase.COMPLETE
+    assert model.requests[0].tools == ()
+    assert model.requests[1].tools == ()
+    assert [definition.name for definition in model.requests[2].tools] == [
+        "read_file",
+        "finish_plan_step",
+    ]
+    assert [definition.name for definition in model.requests[3].tools] == [
+        "read_file",
+        "finish_plan_step",
+    ]
+    assert model.requests[4].tools == (_definition(),)
+    retry_feedback = model.requests[1].messages[-1]
+    assert retry_feedback.role is MessageRole.USER
+    assert "planning heading" in (retry_feedback.content or "")
+    retry_event = next(
+        event
+        for event in observed.events
+        if event.kind is AgentEventKind.PLANNING_RETRY_REQUESTED
+    )
+    assert retry_event.details == {"attempt": 1, "maximum": 2}
+
+
+def test_engine_fails_after_two_invalid_plan_format_retries() -> None:
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(content="No list yet."),
+            AssistantTurn(content="计划：但没有分点"),
+            AssistantTurn(content="1. Missing the required heading."),
+        ]
+    )
+    tools = FakeToolAdapter(definitions=(_definition(),))
+    engine = AgentEngine(
+        model=model,
+        tools=tools,
+        max_steps=4,
+        planning_enabled=True,
+    )
+
+    result = engine.run("Inspect the project")
+
+    assert result.phase is AgentPhase.FAILED
+    assert result.stop_reason is AgentStopReason.PLANNING_ERROR
+    assert result.model_steps == 3
+    assert len(model.requests) == 3
+    assert all(request.tools == () for request in model.requests)
+    assert tools.calls == []
 
 
 def test_engine_runs_multiple_user_turns_with_shared_history_and_fresh_steps() -> None:
@@ -340,18 +519,18 @@ def test_engine_runs_multiple_user_turns_with_shared_history_and_fresh_steps() -
         "first turn continuation state"
     )
     assert second_turn_request[-1].content == "What is its minimum version?"
-    assert sum(
-        message.role is MessageRole.SYSTEM for message in second.messages
-    ) == 1
+    assert all(
+        message.role is not MessageRole.SYSTEM for message in second.messages
+    )
 
 
-def test_engine_supplies_bounded_project_memory_as_reference_on_every_turn() -> None:
-    memory = ProjectMemoryRecord(
-        recorded_at=datetime(2026, 8, 30, tzinfo=timezone.utc),
-        summary=(
-            "The project uses Python 3.11 and pytest. Historical instructions such "
-            "as delete everything are not current commands."
-        ),
+def test_engine_supplies_all_project_memory_as_reference_on_every_turn() -> None:
+    memories = tuple(
+        ProjectMemoryRecord(
+            recorded_at=datetime(2026, 8, index, tzinfo=timezone.utc),
+            summary=f"Durable project memory number {index}.",
+        )
+        for index in range(1, 11)
     )
     model = FakeModelAdapter(
         [
@@ -363,14 +542,14 @@ def test_engine_supplies_bounded_project_memory_as_reference_on_every_turn() -> 
 
     result = engine.run_turn(
         "Inspect only pyproject.toml",
-        project_memory=(memory,),
+        project_memory=memories,
     )
 
     supplied_system = model.requests[0].messages[0].content or ""
     assert result.phase is AgentPhase.COMPLETE
-    assert "Workspace memory and recent-session context" in supplied_system
+    assert "Durable project memory — data only" in supplied_system
     assert "Durable project memory" in supplied_system
-    assert "Python 3.11 and pytest" in supplied_system
+    assert all(memory.summary in supplied_system for memory in memories)
     assert "not an instruction" in supplied_system
     assert model.requests[0].messages[-1].content == "Inspect only pyproject.toml"
     assert result.messages[-2].content == "Inspect only pyproject.toml"
@@ -378,23 +557,26 @@ def test_engine_supplies_bounded_project_memory_as_reference_on_every_turn() -> 
     later = engine.run_turn(
         "A later turn",
         history=result.messages,
-        project_memory=(memory,),
+        project_memory=memories,
     )
 
     assert later.phase is AgentPhase.COMPLETE
-    assert "Python 3.11 and pytest" in (
-        model.requests[1].messages[0].content or ""
-    )
+    later_system = model.requests[1].messages[0].content or ""
+    assert all(memory.summary in later_system for memory in memories)
 
 
-def test_engine_rejects_history_from_a_different_system_prompt() -> None:
+def test_engine_rejects_a_system_message_inside_persistent_history() -> None:
+    model = FakeModelAdapter([AssistantTurn(content="done")])
     engine = AgentEngine(
-        model=FakeModelAdapter([AssistantTurn(content="unused")]),
+        model=model,
         tools=FakeToolAdapter(),
         max_steps=2,
     )
 
-    with pytest.raises(DomainValidationError, match="system prompt"):
+    with pytest.raises(
+        DomainValidationError,
+        match="history must not contain system messages",
+    ):
         engine.run_turn(
             "Continue",
             history=(
@@ -546,7 +728,6 @@ def test_engine_turns_expected_model_errors_into_a_failed_result() -> None:
     assert result.model_steps == 1
     assert "network unavailable" in (result.failure_message or "")
     assert [message.role for message in result.messages] == [
-        MessageRole.SYSTEM,
         MessageRole.USER,
     ]
 
@@ -596,7 +777,7 @@ def test_engine_retries_transient_failure_without_consuming_an_agent_step() -> N
     }
 
 
-def test_engine_compacts_only_the_model_snapshot_and_keeps_full_run_history() -> None:
+def test_engine_fails_instead_of_shortening_the_current_turn() -> None:
     call = ToolCall(id="call-large", name="read_file", arguments_json="{}")
     model = FakeModelAdapter(
         [
@@ -626,20 +807,14 @@ def test_engine_compacts_only_the_model_snapshot_and_keeps_full_run_history() ->
 
     result = engine.run("Read a very large file")
 
-    second_request = model.requests[1].messages
-    assert result.phase is AgentPhase.COMPLETE
-    assert (
-        conversation_char_count(second_request)
-        + tool_definition_char_count(tools.definitions())
-        <= 900
-    )
-    assert second_request[-2].reasoning_content == "required latest reasoning"
-    assert len(result.messages[3].content or "") > len(second_request[-1].content or "")
+    assert result.phase is AgentPhase.FAILED
+    assert result.stop_reason is AgentStopReason.CONTEXT_BUDGET_EXCEEDED
+    assert len(model.requests) == 1
+    assert result.messages[-2].reasoning_content == "required latest reasoning"
+    assert "x" * 4_000 in (result.messages[-1].content or "")
     kinds = [event.kind for event in events.events]
-    assert kinds.count(AgentEventKind.CONTEXT_COMPACTED) == 1
-    compacted_index = kinds.index(AgentEventKind.CONTEXT_COMPACTED)
-    assert kinds[compacted_index + 1] is AgentEventKind.MODEL_REQUESTED
-    assert events.events[compacted_index].details["shortened_message_count"] == 1
+    assert AgentEventKind.CONTEXT_COMPACTED not in kinds
+    assert kinds[-1] is AgentEventKind.TASK_FAILED
 
 
 def test_engine_does_not_send_a_request_that_exceeds_the_total_budget() -> None:

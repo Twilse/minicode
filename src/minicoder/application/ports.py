@@ -16,7 +16,11 @@ from minicoder.domain.models import (
     ToolDefinition,
     ToolResult,
 )
-from minicoder.domain.session import RecentSessionContext
+from minicoder.domain.session import (
+    ArchivedDialogueTurn,
+    ContextCheckpoint,
+    RecentSessionContext,
+)
 from minicoder.domain.state import AgentRunResult
 
 
@@ -46,8 +50,8 @@ class ModelPort(Protocol):
 class ProjectMemoryPort(Protocol):
     """Load and append workspace-scoped project memories."""
 
-    def load_recent(self) -> Sequence[ProjectMemoryRecord]:
-        """Return recent valid records in chronological order."""
+    def load_all(self) -> Sequence[ProjectMemoryRecord]:
+        """Return every valid durable record in chronological order."""
 
         ...
 
@@ -71,8 +75,19 @@ class SessionArchivePort(Protocol):
 
         ...
 
-    def record_turn_started(self, *, task: str, turn_index: int) -> None:
-        """Persist the exact external request before the agent starts work."""
+    def load_dialogue_history(self) -> Sequence[ArchivedDialogueTurn]:
+        """Load every exact external user/final-response turn chronologically."""
+
+        ...
+
+    def record_turn_started(
+        self,
+        *,
+        task: str,
+        history: Sequence[Message],
+        turn_index: int,
+    ) -> None:
+        """Persist the exact prior history and new external request."""
 
         ...
 
@@ -127,7 +142,6 @@ class SessionArchivePort(Protocol):
     def record_maintenance(
         self,
         *,
-        context_summary: str,
         memory_summary: str | None,
         used_fallback: bool,
         turn_index: int,
@@ -137,7 +151,18 @@ class SessionArchivePort(Protocol):
 
         ...
 
-    def close(self, *, context_summary: str | None) -> None:
+    def record_context_checkpoint(
+        self,
+        *,
+        checkpoint: ContextCheckpoint,
+        turn_index: int,
+        model_step: int,
+    ) -> None:
+        """Persist the latest reusable summary without replacing exact history."""
+
+        ...
+
+    def close(self) -> None:
         """Mark a normal process close while retaining every prior record."""
 
         ...

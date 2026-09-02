@@ -14,7 +14,7 @@ from minicoder.application.verification import (
 )
 from minicoder.domain.models import ToolCall, ToolResult
 
-_MUTATION_TOOLS = frozenset({"create_file", "replace_text"})
+_MUTATION_TOOLS = frozenset({"create_file", "write_file", "replace_text"})
 
 
 class CompletionReason(str, Enum):

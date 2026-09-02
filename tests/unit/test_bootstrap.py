@@ -30,6 +30,21 @@ from minicoder.tools.output import (
 from tests.fakes import FakeModelAdapter, MemoryEventSink
 
 
+def _finish_plan_step(step: int, *, suffix: str = "") -> AssistantTurn:
+    return AssistantTurn(
+        content=None,
+        tool_calls=(
+            ToolCall(
+                id=f"call-finish-{step}{suffix}",
+                name="finish_plan_step",
+                arguments_json=(
+                    f'{{"step":{step},"summary":"Step {step} completed."}}'
+                ),
+            ),
+        ),
+    )
+
+
 def test_factory_creates_validated_bootstrap_context(tmp_path: Path) -> None:
     context = ApplicationFactory.create_bootstrap_context(
         environ={
@@ -141,6 +156,7 @@ def test_factory_builds_workspace_scoped_file_tools(tmp_path: Path) -> None:
         "read_file",
         "search_text",
         "create_file",
+        "write_file",
         "replace_text",
         "run_command",
         "read_tool_output",
@@ -222,7 +238,8 @@ def test_factory_creates_one_shot_agent_session_with_injected_adapters(
     )
     model = FakeModelAdapter(
         [
-            AssistantTurn(content="1. Inspect the workspace."),
+            AssistantTurn(content="Plan:\n1. Inspect the workspace."),
+            _finish_plan_step(1, suffix="-one-shot"),
             AssistantTurn(content="done"),
         ]
     )
@@ -243,7 +260,7 @@ def test_factory_keeps_agent_available_when_memory_load_fails(
     tmp_path: Path,
 ) -> None:
     class FailingMemoryStore:
-        def load_recent(self) -> tuple[ProjectMemoryRecord, ...]:
+        def load_all(self) -> tuple[ProjectMemoryRecord, ...]:
             raise MemoryPersistenceError("unreadable memory")
 
         def append(self, record: ProjectMemoryRecord) -> None:
@@ -263,12 +280,12 @@ def test_factory_keeps_agent_available_when_memory_load_fails(
     observed = MemoryEventSink()
     model = FakeModelAdapter(
         [
-            AssistantTurn(content="1. Inspect the workspace."),
+            AssistantTurn(content="Plan:\n1. Inspect the workspace."),
+            _finish_plan_step(1, suffix="-memory-failure"),
             AssistantTurn(content="done without memory"),
             AssistantTurn(
                 content=(
-                    '{"context_summary":"Completed without loaded durable memory.",'
-                    '"memory_action":"none","memory_summary":null}'
+                    '{"memory_action":"none","memory_summary":null}'
                 )
             ),
         ]

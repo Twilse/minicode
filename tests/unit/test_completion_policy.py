@@ -110,6 +110,20 @@ def test_failed_mutation_does_not_create_modification_evidence() -> None:
     assert policy.modified_files == ()
 
 
+def test_successful_write_file_requires_verification() -> None:
+    policy = EvidenceBasedCompletionPolicy()
+    write = _call("write_file", '{"path":"empty.py"}')
+
+    policy.observe_tool(
+        write,
+        _result(write, ok=True, metadata={"path": "empty.py"}),
+        model_step=1,
+    )
+
+    assert policy.evaluate().reason is CompletionReason.VERIFICATION_REQUIRED
+    assert policy.modified_files == ("empty.py",)
+
+
 def test_successful_pytest_after_mutation_allows_completion() -> None:
     policy = EvidenceBasedCompletionPolicy()
     replace = _call("replace_text", '{"path":"app.py"}')

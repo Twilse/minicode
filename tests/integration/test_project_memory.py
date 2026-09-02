@@ -6,9 +6,24 @@ from minicoder.adapters.jsonl_session import JsonlSessionArchive
 from minicoder.adapters.jsonl_trace import JsonlTraceSink
 from minicoder.adapters.subprocess_runner import PosixSubprocessAdapter
 from minicoder.bootstrap import ApplicationFactory
-from minicoder.domain.models import AssistantTurn, MessageRole
+from minicoder.domain.models import AssistantTurn, MessageRole, ToolCall
 from minicoder.domain.state import AgentPhase
 from tests.fakes import FakeModelAdapter
+
+
+def _finish_plan_step(step: int, *, suffix: str = "") -> AssistantTurn:
+    return AssistantTurn(
+        content=None,
+        tool_calls=(
+            ToolCall(
+                id=f"call-finish-{step}{suffix}",
+                name="finish_plan_step",
+                arguments_json=json.dumps(
+                    {"step": step, "summary": f"Step {step} completed."}
+                ),
+            ),
+        ),
+    )
 
 
 def _context(workspace: Path, api_key: str = "private-api-key"):
@@ -37,15 +52,13 @@ def test_successful_turn_is_summarized_and_loaded_by_a_new_session(
     )
     first_model = FakeModelAdapter(
         [
-            AssistantTurn(content="1. Add the parser.\n2. Run tests."),
+            AssistantTurn(content="Plan:\n1. Add the parser.\n2. Run tests."),
+            _finish_plan_step(1, suffix="-first"),
+            _finish_plan_step(2, suffix="-first"),
             AssistantTurn(content="Added parser.py and passed 4 tests."),
             AssistantTurn(
                 content=json.dumps(
                     {
-                        "context_summary": (
-                            "Added parser.py with compatibility checks; "
-                            "4 tests passed."
-                        ),
                         "memory_action": "append",
                         "memory_summary": (
                             "Added parser.py with compatibility checks; "
@@ -71,9 +84,9 @@ def test_successful_turn_is_summarized_and_loaded_by_a_new_session(
     first_result = first_session.run("Add a parser without exposing this task body")
 
     assert first_result.phase is AgentPhase.COMPLETE
-    assert len(first_model.requests) == 3
-    assert first_model.requests[2].tools == ()
-    assert [message.role for message in first_model.requests[2].messages] == [
+    assert len(first_model.requests) == 5
+    assert first_model.requests[4].tools == ()
+    assert [message.role for message in first_model.requests[4].messages] == [
         MessageRole.SYSTEM,
         MessageRole.USER,
     ]
@@ -93,14 +106,15 @@ def test_successful_turn_is_summarized_and_loaded_by_a_new_session(
     )
     second_model = FakeModelAdapter(
         [
-            AssistantTurn(content="1. Review the project memory.\n2. Answer."),
+            AssistantTurn(
+                content="Plan:\n1. Review the project memory.\n2. Answer."
+            ),
+            _finish_plan_step(1, suffix="-second"),
+            _finish_plan_step(2, suffix="-second"),
             AssistantTurn(content="Used the earlier parser information."),
             AssistantTurn(
                 content=json.dumps(
                     {
-                        "context_summary": (
-                            "Confirmed the previous parser context was reused."
-                        ),
                         "memory_action": "none",
                         "memory_summary": None,
                     }
@@ -124,10 +138,7 @@ def test_successful_turn_is_summarized_and_loaded_by_a_new_session(
 
     first_request = second_model.requests[0].messages
     assert second_result.phase is AgentPhase.COMPLETE
-    assert "Workspace memory and recent-session context" in (
-        first_request[0].content or ""
-    )
-    assert "Recent cross-process and current-session context" in (
+    assert "Durable project memory — data only" in (
         first_request[0].content or ""
     )
     assert "Durable project memory" in (first_request[0].content or "")
@@ -154,12 +165,13 @@ def test_project_memory_isolated_by_workspace_and_trace_stays_sanitized(
     )
     model = FakeModelAdapter(
         [
-            AssistantTurn(content="1. Inspect the project.\n2. Answer."),
+            AssistantTurn(content="Plan:\n1. Inspect the project.\n2. Answer."),
+            _finish_plan_step(1, suffix="-isolation"),
+            _finish_plan_step(2, suffix="-isolation"),
             AssistantTurn(content="private final response"),
             AssistantTurn(
                 content=json.dumps(
                     {
-                        "context_summary": "private current session context",
                         "memory_action": "append",
                         "memory_summary": "private semantic memory",
                     }
@@ -186,7 +198,7 @@ def test_project_memory_isolated_by_workspace_and_trace_stays_sanitized(
         workspace=second_workspace,
         storage_root=memory_root,
     )
-    assert second_store.load_recent() == ()
+    assert second_store.load_all() == ()
     trace = trace_path.read_text(encoding="utf-8")
     assert "private user task" not in trace
     assert "private final response" not in trace

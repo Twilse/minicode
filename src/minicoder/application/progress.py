@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -12,7 +11,7 @@ from minicoder.domain.errors import DomainValidationError
 from minicoder.domain.events import EventDetail
 from minicoder.domain.models import ToolCall
 
-_MAX_PLAN_ITEMS = 7
+_MAX_PLAN_ITEMS = 5
 _MAX_PLAN_ITEM_CHARS = 240
 _MAX_DISPLAY_PATH_CHARS = 300
 _MAX_DISPLAY_QUERY_CHARS = 120
@@ -23,121 +22,64 @@ _NUMBERED_PLAN_LINE = re.compile(
     r"^\s*(?:[-*]\s*)?(\d{1,2})[.)、:：]\s*(.+?)\s*$"
 )
 _BULLET_PLAN_LINE = re.compile(r"^\s*[-*•]\s+(.+?)\s*$")
+_MARKDOWN_HEADING_PREFIX = re.compile(r"^#{1,6}\s*")
+_PLAN_HEADING_TERMS = frozenset(
+    {
+        "计划",
+        "计划如下",
+        "工作计划",
+        "行动计划",
+        "执行计划",
+        "实施计划",
+        "开发计划",
+        "修改计划",
+        "处理计划",
+        "规划",
+        "规划如下",
+        "执行规划",
+        "开发规划",
+        "方案",
+        "方案如下",
+        "执行方案",
+        "实施方案",
+        "处理方案",
+        "修改方案",
+        "技术方案",
+        "步骤",
+        "步骤如下",
+        "执行步骤",
+        "实施步骤",
+        "操作步骤",
+        "处理步骤",
+        "开发步骤",
+        "实现思路",
+        "处理思路",
+        "解决思路",
+        "plan",
+        "the plan",
+        "planning",
+        "action plan",
+        "execution plan",
+        "implementation plan",
+        "development plan",
+        "work plan",
+        "proposed plan",
+        "approach",
+        "proposed approach",
+        "implementation approach",
+        "solution",
+        "roadmap",
+        "steps",
+        "action steps",
+        "execution steps",
+        "implementation steps",
+        "next steps",
+    }
+)
 _SAFE_COMMAND_ARGUMENT = re.compile(r"[A-Za-z0-9_./:@%+=,-]+")
 _ANSI_ESCAPE_SEQUENCE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _TERMINAL_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
-_INSPECTION_KEYWORDS = (
-    "inspect",
-    "read",
-    "review",
-    "analy",
-    "locate",
-    "search",
-    "understand",
-    "explore",
-    "examine",
-    "检查",
-    "读取",
-    "查看",
-    "分析",
-    "定位",
-    "搜索",
-    "理解",
-)
-_MUTATION_KEYWORDS = (
-    "implement",
-    "modify",
-    "update",
-    "create",
-    "write",
-    "fix",
-    "add",
-    "change",
-    "extend",
-    "refactor",
-    "实现",
-    "修改",
-    "更新",
-    "创建",
-    "编写",
-    "修复",
-    "新增",
-    "增加",
-    "接入",
-    "补充",
-    "扩展",
-    "重构",
-)
-_TEST_AUTHORING_KEYWORDS = (
-    "test",
-    "tests",
-    "testing",
-    "测试",
-    "用例",
-)
-_DOCUMENTATION_KEYWORDS = (
-    "document",
-    "documentation",
-    "readme",
-    "文档",
-    "说明",
-    "记录",
-)
-_VERIFICATION_KEYWORDS = (
-    "verify",
-    "test",
-    "compile",
-    "build",
-    "lint",
-    "check",
-    "验证",
-    "测试",
-    "编译",
-    "构建",
-    "检查结果",
-)
-_TOOL_KEYWORDS = {
-    "list_files": _INSPECTION_KEYWORDS,
-    "read_file": _INSPECTION_KEYWORDS,
-    "search_text": _INSPECTION_KEYWORDS,
-    "read_tool_output": _INSPECTION_KEYWORDS,
-    "create_file": _MUTATION_KEYWORDS,
-    "replace_text": _MUTATION_KEYWORDS,
-}
-_INSPECTION_COMMANDS = frozenset(
-    {"cat", "find", "git", "grep", "head", "ls", "pwd", "rg", "sed", "tail"}
-)
-_VERIFICATION_COMMANDS = frozenset(
-    {
-        "c++",
-        "cc",
-        "clang",
-        "clang++",
-        "cl",
-        "ctest",
-        "g++",
-        "gcc",
-        "ninja",
-        "pytest",
-    }
-)
-_VERIFICATION_COMMAND_WORDS = frozenset(
-    {
-        "build",
-        "check",
-        "compileall",
-        "ctest",
-        "lint",
-        "ninja",
-        "py_compile",
-        "pytest",
-        "test",
-        "tests",
-        "unittest",
-        "verify",
-    }
-)
 _SENSITIVE_LABEL_PARTS = (
     "api_key",
     "apikey",
@@ -169,39 +111,19 @@ class PlanStepUpdate:
 
 @dataclass(frozen=True, slots=True)
 class PlanTransition:
-    """One evidence-based plan movement produced by a real agent activity."""
+    """One ordered plan movement explicitly reported by the model."""
 
-    updates: tuple[PlanStepUpdate, ...] = ()  # Honest start/complete changes.
-    untracked: tuple[PlanStep, ...] = ()  # Items lacking an individual activity.
-    blocked: bool = False  # Whether this tool would violate strict plan order.
-    expected: PlanStep | None = None  # Item that must receive activity first.
-    attempted: PlanStep | None = None  # Later item the tool appears to target.
-
-
-@dataclass(frozen=True, slots=True)
-class _ToolActivity:
-    """Deterministic action and target facts derived from one ToolCall."""
-
-    action_keywords: tuple[str, ...]
-    target_keywords: tuple[str, ...] = ()
-
-    @property
-    def keywords(self) -> tuple[str, ...]:
-        return _unique(self.action_keywords + self.target_keywords)
+    updates: tuple[PlanStepUpdate, ...] = ()  # Ordered start/complete changes.
 
 
 @dataclass(slots=True)
 class PlanProgress:
-    """Track the currently displayed item of one model-generated plan."""
+    """Require explicit, sequential completion of a model-generated plan."""
 
     items: tuple[str, ...]
     current_index: int = 0
-    _current_has_activity: bool = field(default=False, init=False, repr=False)
-    _untracked_indices: set[int] = field(
-        default_factory=set,
-        init=False,
-        repr=False,
-    )
+    _final_step_reported: bool = field(default=False, init=False, repr=False)
+    _finished: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if (
@@ -213,7 +135,7 @@ class PlanProgress:
             )
         ):
             raise DomainValidationError(
-                "plan progress requires one to seven non-blank text items"
+                "plan progress requires one to five non-blank text items"
             )
         if self.current_index < 0 or self.current_index > len(self.items):
             raise DomainValidationError("plan current index is outside the plan")
@@ -223,6 +145,23 @@ class PlanProgress:
         """Parse a numbered or bulleted model plan without another model call."""
 
         return cls(items=_parse_plan_items(text))
+
+    @classmethod
+    def from_planning_response(cls, text: str) -> PlanProgress:
+        """Accept a loose plan heading plus at least one explicit list item."""
+
+        if not isinstance(text, str) or not text.strip():
+            raise DomainValidationError("planning response must not be empty")
+        if not any(_is_plan_heading(line) for line in text.splitlines()):
+            raise DomainValidationError(
+                "planning response requires a recognized standalone plan heading"
+            )
+        items = _parse_explicit_plan_items(text)
+        if not items:
+            raise DomainValidationError(
+                "planning response requires a numbered or bulleted item"
+            )
+        return cls(items=items)
 
     @property
     def total(self) -> int:
@@ -236,112 +175,75 @@ class PlanProgress:
         )
 
     @property
-    def untracked_count(self) -> int:
-        return len(self._untracked_indices)
+    def current_step(self) -> PlanStep:
+        """Return the currently active item after begin() has been called."""
+
+        if self.current_index == 0:
+            raise DomainValidationError("plan progress has not started")
+        return self._step(self.current_index)
+
+    @property
+    def all_steps_reported(self) -> bool:
+        """Whether the model explicitly reported the final item complete."""
+
+        return self._final_step_reported
 
     def begin(self) -> PlanStepUpdate:
         """Start the first plan item after planning completes."""
 
+        if self.current_index != 0 or self._finished:
+            raise DomainValidationError("plan progress has already started")
         self.current_index = 1
-        self._current_has_activity = False
         return PlanStepUpdate(step=self._step(1), completed=False)
 
-    def advance_for_tool(
-        self,
-        call: ToolCall,
-        *,
-        explicit_step: int | None,
-    ) -> PlanTransition:
-        """Associate one real tool activity with the best matching plan item."""
-
-        activity = _activity_for_tool(call)
-        inferred = _matching_step(
-            self.items,
-            activity,
-            start=max(self.current_index, 1),
-        )
-        target = inferred if inferred is not None else max(self.current_index, 1)
-        if (
-            explicit_step is not None
-            and 1 <= explicit_step <= self.total
-            and (
-                not activity.action_keywords
-                or _step_matches_action(
-                    self.items[explicit_step - 1],
-                    activity.action_keywords,
-                )
-                or inferred is None
-            )
-        ):
-            target = explicit_step
-
-        target = max(target, self.current_index)
-        if target == self.current_index:
-            self._current_has_activity = True
-            return PlanTransition()
-        if not self._current_has_activity:
-            return PlanTransition(
-                blocked=True,
-                expected=self._step(self.current_index),
-                attempted=self._step(target),
-            )
-        if target > self.current_index + 1:
-            return PlanTransition(
-                blocked=True,
-                expected=self._step(self.current_index + 1),
-                attempted=self._step(target),
-            )
-        return self._transition_to(target)
-
-    def finish(self) -> PlanTransition:
-        """Complete the active item; PLAN_COMPLETED closes the whole plan."""
+    def complete_current(self, step: int) -> PlanTransition:
+        """Complete only the active item and activate its immediate successor."""
 
         if self.current_index == 0:
-            self.begin()
-        update = PlanStepUpdate(
+            raise DomainValidationError("plan progress has not started")
+        if self._finished:
+            raise DomainValidationError("plan progress is already finished")
+        if not isinstance(step, int) or isinstance(step, bool):
+            raise DomainValidationError("completed plan step must be an integer")
+        if step != self.current_index:
+            raise DomainValidationError(
+                f"current plan step is {self.current_index}, not {step}"
+            )
+        if self._final_step_reported:
+            raise DomainValidationError("final plan step was already reported")
+        if self.current_index == self.total:
+            self._final_step_reported = True
+            return PlanTransition()
+
+        completed = PlanStepUpdate(
             step=self._step(self.current_index),
             completed=True,
         )
-        untracked = self._mark_untracked(
-            range(self.current_index + 1, self.total + 1)
+        self.current_index += 1
+        started = PlanStepUpdate(
+            step=self._step(self.current_index),
+            completed=False,
         )
-        self.current_index = self.total
-        self._current_has_activity = False
-        return PlanTransition(updates=(update,), untracked=untracked)
+        return PlanTransition(updates=(completed, started))
 
-    def _transition_to(self, index: int) -> PlanTransition:
-        if index <= self.current_index:
-            self._current_has_activity = True
-            return PlanTransition()
+    def finish(self) -> PlanTransition:
+        """Publish final completion only after the final report and acceptance."""
 
-        updates: list[PlanStepUpdate] = []
-        untracked_indices: list[int] = []
-        if self._current_has_activity:
-            updates.append(
+        if not self._final_step_reported:
+            raise DomainValidationError(
+                "cannot finish plan before the final step is reported"
+            )
+        if self._finished:
+            raise DomainValidationError("plan progress is already finished")
+        self._finished = True
+        return PlanTransition(
+            updates=(
                 PlanStepUpdate(
                     step=self._step(self.current_index),
                     completed=True,
-                )
+                ),
             )
-        else:
-            untracked_indices.append(self.current_index)
-        untracked_indices.extend(range(self.current_index + 1, index))
-        self.current_index = index
-        updates.append(PlanStepUpdate(step=self._step(index), completed=False))
-        self._current_has_activity = True
-        return PlanTransition(
-            updates=tuple(updates),
-            untracked=self._mark_untracked(untracked_indices),
         )
-
-    def _mark_untracked(self, indices: Iterable[int]) -> tuple[PlanStep, ...]:
-        newly_untracked: list[PlanStep] = []
-        for index in indices:
-            if index in self._untracked_indices:
-                continue
-            self._untracked_indices.add(index)
-            newly_untracked.append(self._step(index))
-        return tuple(newly_untracked)
 
     def _step(self, index: int) -> PlanStep:
         return PlanStep(index=index, total=self.total, text=self.items[index - 1])
@@ -360,7 +262,7 @@ def tool_display_details(call: ToolCall) -> dict[str, EventDetail]:
             arguments.get("path", "."),
             _MAX_DISPLAY_PATH_CHARS,
         )
-    elif call.name in {"read_file", "create_file", "replace_text"}:
+    elif call.name in {"read_file", "create_file", "write_file", "replace_text"}:
         path = _bounded_text(arguments.get("path"), _MAX_DISPLAY_PATH_CHARS)
         if path:
             details["display_path"] = path
@@ -391,6 +293,25 @@ def tool_display_details(call: ToolCall) -> dict[str, EventDetail]:
 
 
 def _parse_plan_items(text: str) -> tuple[str, ...]:
+    explicit = _parse_explicit_plan_items(text)
+    if explicit:
+        return explicit
+
+    fallback: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        bullet = _BULLET_PLAN_LINE.match(line)
+        fallback.append(_clean_plan_item(bullet.group(1) if bullet else line))
+        if len(fallback) == _MAX_PLAN_ITEMS:
+            break
+    if fallback:
+        return tuple(fallback)
+    return ("执行当前任务",)
+
+
+def _parse_explicit_plan_items(text: str) -> tuple[str, ...]:
     numbered: list[str] = []
     current: str | None = None
     for raw_line in text.splitlines():
@@ -412,162 +333,31 @@ def _parse_plan_items(text: str) -> tuple[str, ...]:
     if numbered:
         return tuple(numbered[:_MAX_PLAN_ITEMS])
 
-    fallback: list[str] = []
+    bullets: list[str] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
             continue
         bullet = _BULLET_PLAN_LINE.match(line)
-        fallback.append(_clean_plan_item(bullet.group(1) if bullet else line))
-        if len(fallback) == _MAX_PLAN_ITEMS:
+        if bullet is None:
+            continue
+        bullets.append(_clean_plan_item(bullet.group(1)))
+        if len(bullets) == _MAX_PLAN_ITEMS:
             break
-    if fallback:
-        return tuple(fallback)
-    return ("执行当前任务",)
+    return tuple(bullets)
+
+
+def _is_plan_heading(raw_line: str) -> bool:
+    line = _remove_terminal_controls(raw_line).strip()
+    line = _MARKDOWN_HEADING_PREFIX.sub("", line).strip()
+    line = line.strip(" *_`").rstrip(":：").strip(" *_`")
+    normalized = " ".join(line.casefold().split())
+    return normalized in _PLAN_HEADING_TERMS
 
 
 def _clean_plan_item(text: str) -> str:
     compact = _remove_terminal_controls(" ".join(text.split())).strip(" *_`")
     return _truncate(compact or "执行当前步骤", _MAX_PLAN_ITEM_CHARS)
-
-
-def _matching_step(
-    items: tuple[str, ...],
-    activity: _ToolActivity,
-    *,
-    start: int,
-) -> int | None:
-    if not activity.keywords:
-        return None
-    best_index: int | None = None
-    best_score = 0
-    for index in range(start, len(items) + 1):
-        score = _activity_score(items[index - 1], activity)
-        if score > best_score:
-            best_index = index
-            best_score = score
-    return best_index
-
-
-def _step_matches_action(item: str, keywords: tuple[str, ...]) -> bool:
-    return any(_contains_keyword(item, keyword) for keyword in keywords)
-
-
-def _activity_score(item: str, activity: _ToolActivity) -> int:
-    action_hits = sum(
-        _contains_keyword(item, keyword)
-        for keyword in activity.action_keywords
-    )
-    if activity.action_keywords and action_hits == 0:
-        return 0
-    target_hits = sum(
-        _contains_keyword(item, keyword)
-        for keyword in activity.target_keywords
-    )
-    if action_hits:
-        return 10 + target_hits * 10
-    return target_hits
-
-
-def _contains_keyword(text: str, keyword: str) -> bool:
-    folded_text = text.casefold()
-    folded_keyword = keyword.casefold()
-    if not folded_keyword.isascii():
-        return folded_keyword in folded_text
-    tokens = re.findall(r"[a-z0-9_+.-]+", folded_text)
-    if folded_keyword == "analy":
-        return any(token.startswith("analy") for token in tokens)
-    return folded_keyword in tokens
-
-
-def _activity_for_tool(call: ToolCall) -> _ToolActivity:
-    arguments = _json_object(call.arguments_json)
-    if call.name != "run_command":
-        actions = _TOOL_KEYWORDS.get(call.name, ())
-        path = None if arguments is None else arguments.get("path")
-        targets = _target_keywords(path)
-        if call.name in {"create_file", "replace_text"}:
-            if _looks_like_test_path(path):
-                actions = _unique(actions + _TEST_AUTHORING_KEYWORDS)
-            if _looks_like_documentation_path(path):
-                actions = _unique(actions + _DOCUMENTATION_KEYWORDS)
-        if call.name == "search_text" and arguments is not None:
-            targets = _unique(
-                targets + _target_keywords(arguments.get("query"))
-            )
-        return _ToolActivity(actions, targets)
-
-    argv = None if arguments is None else arguments.get("argv")
-    if not isinstance(argv, list) or not argv or any(
-        not isinstance(argument, str) for argument in argv
-    ):
-        return _ToolActivity(())
-    program = argv[0].replace("\\", "/").rsplit("/", maxsplit=1)[-1].casefold()
-    for suffix in (".exe", ".cmd", ".bat", ".com"):
-        if program.endswith(suffix):
-            program = program[: -len(suffix)]
-            break
-    words = {
-        word
-        for argument in argv
-        for word in re.split(r"[^a-z0-9_+.-]+", argument.casefold())
-        if word
-    }
-    command_targets = tuple(sorted(words))
-    if program in _INSPECTION_COMMANDS:
-        return _ToolActivity(_INSPECTION_KEYWORDS, command_targets)
-    if program in _VERIFICATION_COMMANDS:
-        return _ToolActivity(_VERIFICATION_KEYWORDS, command_targets)
-    if words & _VERIFICATION_COMMAND_WORDS:
-        return _ToolActivity(_VERIFICATION_KEYWORDS, command_targets)
-    return _ToolActivity(())
-
-
-def _target_keywords(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, str) or not value.strip():
-        return ()
-    normalized = value.strip().replace("\\", "/").casefold()
-    candidates: list[str] = []
-    for part in normalized.split("/"):
-        if not part or part in {".", ".."}:
-            continue
-        candidates.append(part)
-        stem = part.rsplit(".", maxsplit=1)[0]
-        if stem != part:
-            candidates.append(stem)
-        candidates.extend(
-            token
-            for token in re.split(r"[^a-z0-9_+-]+", stem)
-            if len(token) >= 2
-        )
-    return _unique(tuple(candidates))
-
-
-def _looks_like_test_path(value: Any) -> bool:
-    keywords = _target_keywords(value)
-    return any(
-        keyword == "test"
-        or keyword == "tests"
-        or keyword.startswith("test_")
-        or keyword.endswith("_test")
-        for keyword in keywords
-    )
-
-
-def _looks_like_documentation_path(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    normalized = value.replace("\\", "/").casefold()
-    name = normalized.rsplit("/", maxsplit=1)[-1]
-    return (
-        name.startswith("readme")
-        or name.endswith((".md", ".rst"))
-        or "/docs/" in f"/{normalized}"
-    )
-
-
-def _unique(values: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(value for value in values if value))
 
 
 def _json_object(raw: str) -> dict[str, Any] | None:

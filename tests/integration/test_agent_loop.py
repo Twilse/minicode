@@ -8,13 +8,28 @@ from minicoder.domain.state import AgentPhase, AgentStopReason
 from tests.fakes import FakeModelAdapter, MemoryEventSink
 
 
+def _finish_plan_step(step: int, *, suffix: str = "") -> AssistantTurn:
+    return AssistantTurn(
+        content=None,
+        tool_calls=(
+            ToolCall(
+                id=f"call-finish-{step}{suffix}",
+                name="finish_plan_step",
+                arguments_json=(
+                    f'{{"step":{step},"summary":"Step {step} completed."}}'
+                ),
+            ),
+        ),
+    )
+
+
 def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
     context = ApplicationFactory.create_bootstrap_context(
         environ={
             "MINICODER_API_KEY": "not-used",
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
-            "MINICODER_MAX_STEPS": "4",
+            "MINICODER_MAX_STEPS": "6",
             "MINICODER_MEMORY_ENABLED": "false",
             "MINICODER_SESSION_ARCHIVE_ENABLED": "false",
         },
@@ -37,9 +52,11 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
     )
     model = FakeModelAdapter(
         [
-            AssistantTurn(content="1. Create the file.\n2. Verify it."),
+            AssistantTurn(content="Plan:\n1. Create the file.\n2. Verify it."),
             AssistantTurn(content=None, tool_calls=(create_call,)),
+            _finish_plan_step(1),
             AssistantTurn(content=None, tool_calls=(verify_call,)),
+            _finish_plan_step(2),
             AssistantTurn(content="Created and verified the requested file."),
         ]
     )
@@ -55,7 +72,7 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
 
     assert result.phase is AgentPhase.COMPLETE
     assert result.stop_reason is AgentStopReason.FINAL_RESPONSE
-    assert result.model_steps == 4
+    assert result.model_steps == 6
     assert (tmp_path / "created_by_agent.py").read_text(encoding="utf-8") == (
         "value = 1\n"
     )
@@ -82,9 +99,11 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
         AgentEventKind.MODEL_REQUESTED,
         AgentEventKind.PLAN_STEP_COMPLETED,
         AgentEventKind.PLAN_STEP_STARTED,
+        AgentEventKind.MODEL_REQUESTED,
         AgentEventKind.TOOL_CALLED,
         AgentEventKind.TOOL_FINISHED,
         AgentEventKind.VERIFICATION_PASSED,
+        AgentEventKind.MODEL_REQUESTED,
         AgentEventKind.MODEL_REQUESTED,
         AgentEventKind.PLAN_STEP_COMPLETED,
         AgentEventKind.PLAN_COMPLETED,
@@ -92,7 +111,7 @@ def test_factory_session_runs_model_tool_model_loop(tmp_path: Path) -> None:
     ]
     assert events.events[6].details["display_path"] == "created_by_agent.py"
     assert (
-        events.events[11].details["display_command"]
+        events.events[12].details["display_command"]
         == "python -m py_compile created_by_agent.py"
     )
 
@@ -105,7 +124,7 @@ def test_factory_session_continues_unverified_work_in_a_second_user_turn(
             "MINICODER_API_KEY": "not-used",
             "MINICODER_BASE_URL": "https://models.example.com/v1",
             "MINICODER_MODEL": "not-used",
-            "MINICODER_MAX_STEPS": "3",
+            "MINICODER_MAX_STEPS": "4",
             "MINICODER_MEMORY_ENABLED": "false",
             "MINICODER_SESSION_ARCHIVE_ENABLED": "false",
         },
@@ -128,11 +147,13 @@ def test_factory_session_continues_unverified_work_in_a_second_user_turn(
     )
     model = FakeModelAdapter(
         [
-            AssistantTurn(content="1. Create the file.\n2. Verify it."),
+            AssistantTurn(content="Plan:\n1. Create the file.\n2. Verify it."),
             AssistantTurn(content=None, tool_calls=(create_call,)),
+            _finish_plan_step(1, suffix="-first"),
             AssistantTurn(content="The file is created."),
-            AssistantTurn(content="1. Verify the existing file."),
+            AssistantTurn(content="Plan:\n1. Verify the existing file."),
             AssistantTurn(content=None, tool_calls=(verify_call,)),
+            _finish_plan_step(1, suffix="-second"),
             AssistantTurn(content="The file is now verified."),
         ]
     )
@@ -153,12 +174,12 @@ def test_factory_session_continues_unverified_work_in_a_second_user_turn(
         second = session.submit("Continue by verifying the file")
 
     assert second.phase is AgentPhase.COMPLETE
-    assert second.model_steps == 3
+    assert second.model_steps == 4
     assert second.final_response == "The file is now verified."
     assert (tmp_path / "continued.py").read_text(encoding="utf-8") == (
         "value = 2\n"
     )
-    second_turn_request = model.requests[3].messages
+    second_turn_request = model.requests[4].messages
     assert "Continue by verifying the file" in (
         second_turn_request[-1].content or ""
     )

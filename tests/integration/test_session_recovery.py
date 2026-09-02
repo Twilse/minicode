@@ -40,19 +40,6 @@ def test_new_process_always_receives_the_latest_failed_session_context(
     first_model = FakeModelAdapter(
         [
             AssistantTurn(content=None, tool_calls=(call,)),
-            AssistantTurn(
-                content=json.dumps(
-                    {
-                        "context_summary": (
-                            "Goal: finish the old feature. The turn stopped at the "
-                            "model limit after listing files; implementation and "
-                            "verification remain pending."
-                        ),
-                        "memory_action": "none",
-                        "memory_summary": None,
-                    }
-                )
-            ),
         ]
     )
     first_archive = JsonlSessionArchive(
@@ -74,23 +61,11 @@ def test_new_process_always_receives_the_latest_failed_session_context(
     assert "Finish the old feature" in archived_text
     assert '"name":"list_files"' in archived_text
     assert '"type":"tool_result"' in archived_text
-    assert '"request_kind":"maintenance"' in archived_text
+    assert '"request_kind":"maintenance"' not in archived_text
 
     second_model = FakeModelAdapter(
         [
             AssistantTurn(content="I inspected the unrelated current request."),
-            AssistantTurn(
-                content=json.dumps(
-                    {
-                        "context_summary": (
-                            "The prior unfinished feature remains known; the current "
-                            "unrelated inspection also completed."
-                        ),
-                        "memory_action": "none",
-                        "memory_summary": None,
-                    }
-                )
-            ),
         ]
     )
     second_archive = JsonlSessionArchive(
@@ -109,11 +84,25 @@ def test_new_process_always_receives_the_latest_failed_session_context(
     assert completed.phase is AgentPhase.COMPLETE
     first_request = second_model.requests[0]
     system = first_request.messages[0].content or ""
-    assert "Recent cross-process and current-session context" in system
-    assert "Last task: Finish the old feature" in system
-    assert "Last status: failed" in system
-    assert "Stop reason: max_steps" in system
-    assert "implementation and verification remain pending" in system
+    boundary = next(
+        message.content or ""
+        for message in first_request.messages
+        if "Previous process boundary" in (message.content or "")
+    )
+    assert "Previous process boundary" not in system
+    assert "Finish the old feature" not in system
+    assert "Previous process boundary" in boundary
+    assert "Status: failed" in boundary
+    assert "Stop reason: max_steps" in boundary
+    assert "maximum of 1 model steps" not in boundary
+    assert any(
+        message.tool_calls and message.tool_calls[0].name == "list_files"
+        for message in first_request.messages
+    )
+    assert any(
+        message.content == "Finish the old feature"
+        for message in first_request.messages
+    )
     assert first_request.messages[-1].content == "Inspect a new unrelated concern"
     assert {definition.name for definition in first_request.tools} >= {
         "list_files",

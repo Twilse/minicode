@@ -20,11 +20,15 @@ from minicoder.domain.models import (
     ToolDefinition,
     ToolResult,
 )
-from minicoder.domain.session import ArchivedTurnStatus, RecentSessionContext
+from minicoder.domain.session import (
+    ArchivedDialogueTurn,
+    ArchivedTurnStatus,
+    ContextCheckpoint,
+    RecentSessionContext,
+)
 from minicoder.domain.state import AgentPhase, AgentRunResult
 
 SESSION_SCHEMA_VERSION = 1
-DEFAULT_RECENT_MESSAGE_COUNT = 24
 
 
 class JsonlSessionArchive(SessionArchivePort):
@@ -35,15 +39,7 @@ class JsonlSessionArchive(SessionArchivePort):
         *,
         workspace: str | Path,
         storage_root: str | Path | None = None,
-        recent_message_count: int = DEFAULT_RECENT_MESSAGE_COUNT,
     ) -> None:
-        if (
-            not isinstance(recent_message_count, int)
-            or isinstance(recent_message_count, bool)
-            or recent_message_count <= 0
-        ):
-            raise ValueError("recent_message_count must be a positive integer")
-
         resolved_workspace = Path(workspace).expanduser().resolve()
         root = (
             Path.home() / ".minicoder" / "sessions"
@@ -70,7 +66,6 @@ class JsonlSessionArchive(SessionArchivePort):
         timestamp = now.strftime("%Y%m%dT%H%M%S%fZ")
         self._path = self._directory / f"{timestamp}-{self._session_id}.jsonl"
         self._workspace = resolved_workspace
-        self._recent_message_count = recent_message_count
         self._sequence = 0
         self._closed = False
         self._append(
@@ -110,10 +105,40 @@ class JsonlSessionArchive(SessionArchivePort):
                 return context
         return None
 
-    def record_turn_started(self, *, task: str, turn_index: int) -> None:
+    def load_dialogue_history(self) -> tuple[ArchivedDialogueTurn, ...]:
+        """Reconstruct all external turns without exposing internal protocol logs."""
+
+        try:
+            candidates = sorted(
+                path
+                for path in self._directory.glob("*.jsonl")
+                if path != self._path and path.is_file()
+            )
+        except OSError as exc:
+            raise SessionPersistenceError(
+                "could not enumerate previous session archives"
+            ) from exc
+
+        return tuple(
+            turn
+            for candidate in candidates
+            for turn in self._dialogue_turns_from_file(candidate)
+        )
+
+    def record_turn_started(
+        self,
+        *,
+        task: str,
+        history: Sequence[Message],
+        turn_index: int,
+    ) -> None:
         self._append(
             "turn_started",
-            {"task": task, "turn_index": turn_index},
+            {
+                "task": task,
+                "turn_index": turn_index,
+                "history": [_message_payload(message) for message in history],
+            },
         )
 
     def record_model_request(
@@ -203,7 +228,6 @@ class JsonlSessionArchive(SessionArchivePort):
     def record_maintenance(
         self,
         *,
-        context_summary: str,
         memory_summary: str | None,
         used_fallback: bool,
         turn_index: int,
@@ -214,18 +238,35 @@ class JsonlSessionArchive(SessionArchivePort):
             {
                 "turn_index": turn_index,
                 "model_step": model_step,
-                "context_summary": context_summary,
                 "memory_summary": memory_summary,
                 "used_fallback": used_fallback,
             },
         )
 
-    def close(self, *, context_summary: str | None) -> None:
+    def record_context_checkpoint(
+        self,
+        *,
+        checkpoint: ContextCheckpoint,
+        turn_index: int,
+        model_step: int,
+    ) -> None:
+        self._append(
+            "context_checkpoint",
+            {
+                "turn_index": turn_index,
+                "model_step": model_step,
+                "summary": checkpoint.summary,
+                "covered_message_count": checkpoint.covered_message_count,
+                "source_hash": checkpoint.source_hash,
+            },
+        )
+
+    def close(self) -> None:
         if self._closed:
             return
         self._append(
             "session_closed",
-            {"context_summary": context_summary},
+            {},
         )
         self._closed = True
 
@@ -275,10 +316,8 @@ class JsonlSessionArchive(SessionArchivePort):
         last_task = ""
         last_turn_index: int | None = None
         last_result: Mapping[str, Any] | None = None
-        rolling_context = ""
-        previous_context_for_last_turn = ""
-        last_turn_context = ""
         partial_messages: tuple[Message, ...] = ()
+        context_checkpoint: ContextCheckpoint | None = None
         for record in records:
             raw_session_id = record.get("session_id")
             if isinstance(raw_session_id, str) and raw_session_id:
@@ -290,8 +329,12 @@ class JsonlSessionArchive(SessionArchivePort):
             payload = record.get("payload")
             if not isinstance(payload, dict):
                 continue
+            if kind == "context_checkpoint":
+                parsed_checkpoint = _parse_context_checkpoint(payload)
+                if parsed_checkpoint is not None:
+                    context_checkpoint = parsed_checkpoint
+                continue
             if kind == "turn_started" and isinstance(payload.get("task"), str):
-                previous_context_for_last_turn = rolling_context
                 last_task = payload["task"]
                 raw_turn_index = payload.get("turn_index")
                 last_turn_index = (
@@ -301,16 +344,27 @@ class JsonlSessionArchive(SessionArchivePort):
                     else None
                 )
                 last_result = None
-                last_turn_context = ""
-                partial_messages = ()
+                raw_history = payload.get("history")
+                if isinstance(raw_history, list):
+                    parsed_history = _conversation_messages(
+                        _parse_messages(raw_history)
+                    )
+                    partial_messages = (
+                        *parsed_history,
+                        Message(role=MessageRole.USER, content=last_task),
+                    )
+                else:
+                    # Schema-v1 archives created before full-history checkpoints
+                    # can still recover from their first exact model request.
+                    partial_messages = ()
             elif not _belongs_to_turn(payload, last_turn_index):
                 continue
             elif kind == "model_request" and payload.get(
                 "request_kind"
             ) in {"planning", "execution"}:
                 parsed_request = _parse_messages(payload.get("messages"))
-                if parsed_request:
-                    partial_messages = parsed_request
+                if parsed_request and not partial_messages:
+                    partial_messages = _conversation_messages(parsed_request)
             elif kind == "model_response" and payload.get(
                 "request_kind"
             ) in {"planning", "execution"}:
@@ -327,24 +381,15 @@ class JsonlSessionArchive(SessionArchivePort):
                     partial_messages = (*partial_messages, result_message)
             elif kind == "turn_result" and payload.get("task") == last_task:
                 last_result = payload
-            elif kind == "maintenance" and last_task:
-                raw_summary = payload.get("context_summary")
-                if isinstance(raw_summary, str) and raw_summary.strip():
-                    last_turn_context = raw_summary.strip()
-                    rolling_context = last_turn_context
 
         if not session_id or last_recorded_at is None or not last_task.strip():
             return None
 
-        context_summary = last_turn_context or _fallback_context_summary(
-            last_task,
-            last_result,
-            previous_context=previous_context_for_last_turn,
-        )
-
         status = ArchivedTurnStatus.IN_PROGRESS
         stop_reason: str | None = None
-        recent_messages: tuple[Message, ...] = ()
+        messages: tuple[Message, ...] = ()
+        final_response: str | None = None
+        failure_message: str | None = None
         if last_result is not None:
             raw_phase = last_result.get("phase")
             if raw_phase == AgentPhase.COMPLETE.value:
@@ -354,22 +399,108 @@ class JsonlSessionArchive(SessionArchivePort):
             raw_reason = last_result.get("stop_reason")
             if isinstance(raw_reason, str) and raw_reason.strip():
                 stop_reason = raw_reason
+            raw_final = last_result.get("final_response")
+            if isinstance(raw_final, str) and raw_final.strip():
+                final_response = raw_final
+            raw_failure = last_result.get("failure_message")
+            if isinstance(raw_failure, str) and raw_failure.strip():
+                failure_message = raw_failure
             raw_messages = last_result.get("messages")
             if isinstance(raw_messages, list):
-                parsed = _parse_messages(raw_messages)
-                recent_messages = parsed[-self._recent_message_count :]
+                messages = _conversation_messages(_parse_messages(raw_messages))
         else:
-            recent_messages = partial_messages[-self._recent_message_count :]
+            messages = partial_messages
 
         return RecentSessionContext(
             session_id=session_id,
             recorded_at=last_recorded_at,
-            context_summary=context_summary,
             last_task=last_task,
             status=status,
             stop_reason=stop_reason,
-            recent_messages=recent_messages,
+            messages=messages,
+            final_response=final_response,
+            failure_message=failure_message,
+            context_checkpoint=context_checkpoint,
         )
+
+    def _dialogue_turns_from_file(
+        self,
+        path: Path,
+    ) -> tuple[ArchivedDialogueTurn, ...]:
+        records = _read_records(path)
+        if not records:
+            return ()
+
+        session_id = next(
+            (
+                value
+                for record in records
+                if isinstance((value := record.get("session_id")), str) and value
+            ),
+            "",
+        )
+        if not session_id:
+            return ()
+
+        started: dict[int, tuple[datetime, str]] = {}
+        results: dict[int, Mapping[str, Any]] = {}
+        order: list[int] = []
+        for record in records:
+            payload = record.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            raw_turn_index = payload.get("turn_index")
+            if (
+                not isinstance(raw_turn_index, int)
+                or isinstance(raw_turn_index, bool)
+                or raw_turn_index <= 0
+            ):
+                continue
+            if record.get("type") == "turn_started":
+                task = payload.get("task")
+                recorded_at = _parse_timestamp(record.get("recorded_at"))
+                if (
+                    isinstance(task, str)
+                    and task.strip()
+                    and recorded_at is not None
+                    and raw_turn_index not in started
+                ):
+                    started[raw_turn_index] = (recorded_at, task)
+                    order.append(raw_turn_index)
+            elif record.get("type") == "turn_result":
+                results[raw_turn_index] = payload
+
+        turns: list[ArchivedDialogueTurn] = []
+        for turn_index in order:
+            recorded_at, task = started[turn_index]
+            result = results.get(turn_index)
+            status = ArchivedTurnStatus.IN_PROGRESS
+            final_response: str | None = None
+            failure_message: str | None = None
+            if result is not None and result.get("task") == task:
+                phase = result.get("phase")
+                if phase == AgentPhase.COMPLETE.value:
+                    status = ArchivedTurnStatus.COMPLETE
+                elif phase == AgentPhase.FAILED.value:
+                    status = ArchivedTurnStatus.FAILED
+                raw_final = result.get("final_response")
+                if isinstance(raw_final, str) and raw_final.strip():
+                    final_response = raw_final
+                raw_failure = result.get("failure_message")
+                if isinstance(raw_failure, str) and raw_failure.strip():
+                    failure_message = raw_failure
+            turns.append(
+                ArchivedDialogueTurn(
+                    session_id=session_id,
+                    turn_index=turn_index,
+                    recorded_at=recorded_at,
+                    task=task,
+                    status=status,
+                    final_response=final_response,
+                    failure_message=failure_message,
+                )
+            )
+        return tuple(turns)
 
 
 def _message_payload(message: Message) -> dict[str, Any]:
@@ -411,6 +542,14 @@ def _parse_messages(value: Any) -> tuple[Message, ...]:
         message
         for item in value
         if (message := _parse_message(item)) is not None
+    )
+
+
+def _conversation_messages(messages: Sequence[Message]) -> tuple[Message, ...]:
+    """Normalize legacy archives to persistent history without System messages."""
+
+    return tuple(
+        message for message in messages if message.role is not MessageRole.SYSTEM
     )
 
 
@@ -535,47 +674,17 @@ def _read_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _fallback_context_summary(
-    task: str,
-    result: Mapping[str, Any] | None,
-    *,
-    previous_context: str = "",
-) -> str:
-    sections: list[str] = []
-    if previous_context.strip():
-        sections.append(
-            "Previous rolling context:\n"
-            f"{_bounded_recovery_text(previous_context.strip(), 6_000)}"
+def _parse_context_checkpoint(
+    payload: Mapping[str, Any],
+) -> ContextCheckpoint | None:
+    try:
+        return ContextCheckpoint(
+            summary=payload["summary"],
+            covered_message_count=payload["covered_message_count"],
+            source_hash=payload["source_hash"],
         )
-    safe_task = _bounded_recovery_text(task, 2_000)
-    if result is None:
-        sections.append(
-            f"Last user task: {safe_task}\n"
-            "Status: interrupted before a terminal result."
-        )
-        return "\n\n".join(sections)
-    phase = result.get("phase", "unknown")
-    reason = result.get("stop_reason", "unknown")
-    outcome = result.get("final_response") or result.get("failure_message") or ""
-    sections.append(
-        f"Last user task: {safe_task}\n"
-        f"Status: {phase}; stop reason: {reason}.\n"
-        "Last visible outcome: "
-        f"{_bounded_recovery_text(str(outcome), 4_000)}"
-    )
-    return "\n\n".join(sections).strip()
-
-
-def _bounded_recovery_text(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    marker = "\n...[recovery data shortened]...\n"
-    available = limit - len(marker)
-    if available <= 0:
-        return text[:limit]
-    head_chars = available * 3 // 10
-    tail_chars = available - head_chars
-    return f"{text[:head_chars]}{marker}{text[-tail_chars:]}"
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _timestamp(value: datetime) -> str:

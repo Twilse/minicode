@@ -31,21 +31,13 @@ class ProjectMemoryRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class TurnMaintenanceDecision:
-    """One post-turn rolling-context update and optional durable memory."""
+class LongTermMemoryDecision:
+    """One post-turn decision about appending durable project memory."""
 
-    context_summary: str  # Model-maintained summary used by following turns.
-    memory_summary: str | None  # Durable fact selected by the model, or None.
+    memory_summary: str | None  # Valuable durable fact, or None when not warranted.
     used_fallback: bool = False  # Whether host fallback replaced a failed model call.
 
     def __post_init__(self) -> None:
-        if (
-            not isinstance(self.context_summary, str)
-            or not self.context_summary.strip()
-        ):
-            raise DomainValidationError(
-                "maintenance context_summary must be non-blank text"
-            )
         if self.memory_summary is not None and (
             not isinstance(self.memory_summary, str)
             or not self.memory_summary.strip()

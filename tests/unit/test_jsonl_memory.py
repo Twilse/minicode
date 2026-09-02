@@ -64,7 +64,7 @@ def test_jsonl_memory_uses_workspace_identity_and_isolates_projects(
     assert first.path != second.path
 
 
-def test_jsonl_memory_loads_recent_valid_records_and_skips_bad_lines(
+def test_jsonl_memory_loads_all_valid_records_and_skips_bad_lines(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -72,7 +72,6 @@ def test_jsonl_memory_loads_recent_valid_records_and_skips_bad_lines(
     store = JsonlProjectMemoryStore(
         workspace=workspace,
         storage_root=tmp_path / "memory",
-        max_records=2,
     )
     lines = [
         "not-json",
@@ -101,9 +100,10 @@ def test_jsonl_memory_loads_recent_valid_records_and_skips_bad_lines(
     ]
     store.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    records = store.load_recent()
+    records = store.load_all()
 
     assert [record.summary for record in records] == [
+        "old valid record",
         "middle valid record",
         "latest valid record",
     ]
@@ -130,7 +130,7 @@ def test_jsonl_memory_skips_one_invalid_utf8_line_without_losing_neighbors(
     )
     store.path.write_bytes(first + invalid + second)
 
-    records = store.load_recent()
+    records = store.load_all()
 
     assert [record.summary for record in records] == ["first", "second"]
 
@@ -151,7 +151,7 @@ def test_jsonl_memory_bounds_loaded_and_appended_summaries(tmp_path: Path) -> No
         )
     )
 
-    record = store.load_recent()[0]
+    record = store.load_all()[0]
     assert len(record.summary) == 80
     assert record.summary.startswith("begin-")
     assert record.summary.endswith("-end")

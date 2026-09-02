@@ -1,131 +1,125 @@
 import json
 from datetime import datetime, timezone
 
-from minicoder.application.context import conversation_char_count
 from minicoder.application.event_bus import EventBus
-from minicoder.application.memory import ModelTurnMemoryMaintainer
+from minicoder.application.memory import ModelLongTermMemoryMaintainer
 from minicoder.domain.errors import ModelConnectionError
 from minicoder.domain.events import AgentEventKind
 from minicoder.domain.memory import ProjectMemoryRecord
-from minicoder.domain.models import (
-    AssistantTurn,
-    Message,
-    MessageRole,
-    ToolCall,
-    ToolResult,
-)
-from minicoder.domain.state import (
-    AgentPhase,
-    AgentRunResult,
-    AgentStopReason,
-)
+from minicoder.domain.models import AssistantTurn, Message, MessageRole, ToolCall
+from minicoder.domain.state import AgentPhase, AgentRunResult, AgentStopReason
 from tests.fakes import FakeModelAdapter, MemoryEventSink
 
 
-def _result(
-    *,
-    phase: AgentPhase = AgentPhase.COMPLETE,
-    messages: tuple[Message, ...] = (),
-) -> AgentRunResult:
-    if phase is AgentPhase.COMPLETE:
-        return AgentRunResult(
-            phase=phase,
-            stop_reason=AgentStopReason.FINAL_RESPONSE,
-            model_steps=4,
-            messages=messages,
-            final_response="Implemented the parser and passed four tests.",
-        )
+def _result() -> AgentRunResult:
     return AgentRunResult(
-        phase=phase,
-        stop_reason=AgentStopReason.MAX_STEPS,
-        model_steps=40,
-        messages=messages,
-        failure_message=(
-            "Reached the model limit; parser.py changed but tests were not run."
-        ),
+        phase=AgentPhase.COMPLETE,
+        stop_reason=AgentStopReason.FINAL_RESPONSE,
+        model_steps=4,
+        messages=(),
+        final_response="Implemented the parser and passed four tests.",
     )
 
 
-def test_maintainer_updates_context_and_selects_durable_memory() -> None:
-    decision_json = json.dumps(
-        {
-            "context_summary": (
-                "Goal: add parser. Completed: parser.py. Verification: 4 tests passed."
-            ),
-            "memory_action": "append",
-            "memory_summary": (
-                "parser.py now validates compatibility; four tests passed. secret-key"
-            ),
-        }
+def _record(index: int, summary: str) -> ProjectMemoryRecord:
+    return ProjectMemoryRecord(
+        recorded_at=datetime(2026, 8, index, tzinfo=timezone.utc),
+        summary=summary,
     )
-    model = FakeModelAdapter([AssistantTurn(content=decision_json)])
+
+
+def test_maintainer_selects_one_valuable_redacted_memory_and_sends_all_existing() -> None:
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(
+                content=json.dumps(
+                    {
+                        "memory_action": "append",
+                        "memory_summary": (
+                            "parser.py uses a stable compatibility check. secret-key"
+                        ),
+                    }
+                )
+            )
+        ]
+    )
     observed = MemoryEventSink()
-    call = ToolCall(
-        id="call-1",
-        name="read_file",
-        arguments_json='{"path":"parser.py"}',
-    )
-    messages = (
-        Message(role=MessageRole.USER, content="Add parser secret-key"),
-        AssistantTurn(
-            content=None,
-            tool_calls=(call,),
-            reasoning_content="private provider reasoning",
-        ).as_message(),
-        ToolResult(
-            call_id=call.id,
-            tool_name=call.name,
-            ok=True,
-            content="parser source",
-        ).as_message(),
-        Message(role=MessageRole.ASSISTANT, content="done"),
-    )
-    maintainer = ModelTurnMemoryMaintainer(
+    existing = tuple(_record(index, f"durable-memory-{index}") for index in range(1, 10))
+    maintainer = ModelLongTermMemoryMaintainer(
         model=model,
-        events=EventBus((observed,), run_id="maintenance"),
+        events=EventBus((observed,), run_id="memory"),
         sensitive_values=("secret-key",),
-    )
-    existing_memory = ProjectMemoryRecord(
-        recorded_at=datetime(2026, 8, 31, tzinfo=timezone.utc),
-        summary="The parser already uses Python 3.11.",
     )
 
     decision = maintainer.maintain(
         task="Add parser secret-key",
-        result=_result(messages=messages),
-        turn_messages=messages,
-        previous_context="Earlier project context.",
-        project_memory=(existing_memory,),
+        result=_result(),
+        turn_messages=(Message(role=MessageRole.USER, content="Add parser"),),
+        project_memory=existing,
         model_step=4,
     )
 
-    assert "4 tests passed" in decision.context_summary
     assert decision.memory_summary == (
-        "parser.py now validates compatibility; four tests passed. <redacted>"
+        "parser.py uses a stable compatibility check. <redacted>"
     )
-    assert decision.used_fallback is False
-    assert len(model.requests) == 1
-    assert model.requests[0].tools == ()
     source = model.requests[0].messages[-1].content or ""
     assert "secret-key" not in source
-    assert "read_file" in source
-    assert "parser source" in source
-    assert "The parser already uses Python 3.11" in source
-    assert "private provider reasoning" not in source
+    assert all(record.summary in source for record in existing)
+    assert "most calls should produce 'none'" in (
+        model.requests[0].messages[0].content or ""
+    )
     assert [event.kind for event in observed.events] == [
         AgentEventKind.MEMORY_SUMMARY_REQUESTED,
         AgentEventKind.MEMORY_SUMMARY_COMPLETED,
     ]
-    assert observed.events[-1].details["memory_selected"] is True
 
 
-def test_maintainer_allows_the_model_to_skip_long_term_memory() -> None:
+def test_maintainer_accepts_none_as_the_normal_decision() -> None:
+    model = FakeModelAdapter(
+        [AssistantTurn(content='{"memory_action":"none","memory_summary":null}')]
+    )
+
+    decision = ModelLongTermMemoryMaintainer(model=model).maintain(
+        task="What time is it?",
+        result=_result(),
+        turn_messages=(),
+        model_step=1,
+    )
+
+    assert decision.memory_summary is None
+    assert decision.used_fallback is False
+
+
+def test_maintainer_suppresses_a_duplicate_even_when_model_requests_append() -> None:
+    summary = "The project requires Python 3.11 for all supported environments."
+    model = FakeModelAdapter(
+        [
+            AssistantTurn(
+                content=json.dumps(
+                    {"memory_action": "append", "memory_summary": summary}
+                )
+            )
+        ]
+    )
+
+    decision = ModelLongTermMemoryMaintainer(model=model).maintain(
+        task="Repeat the Python requirement",
+        result=_result(),
+        turn_messages=(),
+        project_memory=(_record(1, summary),),
+        model_step=1,
+    )
+
+    assert decision.memory_summary is None
+
+
+def test_maintainer_rejects_old_rolling_context_response_shape() -> None:
     model = FakeModelAdapter(
         [
             AssistantTurn(
                 content=json.dumps(
                     {
-                        "context_summary": "The user asked a transient question.",
+                        "context_summary": "obsolete rolling context",
                         "memory_action": "none",
                         "memory_summary": None,
                     }
@@ -133,156 +127,64 @@ def test_maintainer_allows_the_model_to_skip_long_term_memory() -> None:
             )
         ]
     )
-    maintainer = ModelTurnMemoryMaintainer(model=model)
 
-    decision = maintainer.maintain(
-        task="What time is it?",
-        result=_result(),
-        turn_messages=(),
-        previous_context=None,
-        model_step=1,
-    )
-
-    assert decision.context_summary == "The user asked a transient question."
-    assert decision.memory_summary is None
-
-
-def test_maintainer_forces_none_when_long_term_memory_is_disabled() -> None:
-    model = FakeModelAdapter(
-        [
-            AssistantTurn(
-                content=json.dumps(
-                    {
-                        "context_summary": "Keep this only in rolling context.",
-                        "memory_action": "append",
-                        "memory_summary": "Model tried to persist this.",
-                    }
-                )
-            )
-        ]
-    )
-    maintainer = ModelTurnMemoryMaintainer(
-        model=model,
-        allow_long_term_memory=False,
-    )
-
-    decision = maintainer.maintain(
+    decision = ModelLongTermMemoryMaintainer(model=model).maintain(
         task="Temporary work",
         result=_result(),
         turn_messages=(),
-        previous_context=None,
         model_step=1,
     )
 
-    assert decision.context_summary == "Keep this only in rolling context."
     assert decision.memory_summary is None
+    assert decision.used_fallback is True
 
 
-def test_maintainer_fallback_preserves_failed_turn_status() -> None:
+def test_maintainer_defaults_to_none_on_model_or_tool_protocol_failure() -> None:
     class FailingModel:
         def complete(self, **_: object) -> AssistantTurn:
             raise ModelConnectionError("offline")
 
-    observed = MemoryEventSink()
-    maintainer = ModelTurnMemoryMaintainer(
-        model=FailingModel(),
-        events=EventBus((observed,), run_id="maintenance-fallback"),
-    )
-
-    decision = maintainer.maintain(
-        task="Finish the parser",
-        result=_result(phase=AgentPhase.FAILED),
+    failed = ModelLongTermMemoryMaintainer(model=FailingModel()).maintain(
+        task="Finish parser",
+        result=_result(),
         turn_messages=(),
-        previous_context="Parser implementation is partial.",
-        model_step=40,
+        model_step=4,
     )
-
-    assert "Parser implementation is partial" in decision.context_summary
-    assert "stop reason: max_steps" in decision.context_summary
-    assert "tests were not run" in decision.context_summary
-    assert decision.memory_summary is None
-    assert decision.used_fallback is True
-    assert observed.events[-1].kind is AgentEventKind.MEMORY_SUMMARY_FAILED
-    assert observed.events[-1].details["reason"] == "model_error"
-
-
-def test_maintainer_rejects_an_unexpected_tool_call() -> None:
     call = ToolCall(id="memory-call", name="read_file", arguments_json="{}")
-    model = FakeModelAdapter(
-        [AssistantTurn(content=None, tool_calls=(call,))]
-    )
-    maintainer = ModelTurnMemoryMaintainer(model=model)
-
-    decision = maintainer.maintain(
+    tool_model = FakeModelAdapter([AssistantTurn(content=None, tool_calls=(call,))])
+    tool_failed = ModelLongTermMemoryMaintainer(model=tool_model).maintain(
         task="Inspect app.py",
         result=_result(),
         turn_messages=(),
-        previous_context=None,
         model_step=1,
     )
 
-    assert decision.used_fallback is True
-    assert decision.memory_summary is None
-    assert model.requests[0].tools == ()
+    assert failed.memory_summary is None and failed.used_fallback is True
+    assert tool_failed.memory_summary is None and tool_failed.used_fallback is True
+    assert tool_model.requests[0].tools == ()
 
 
-def test_maintainer_never_sends_more_than_its_input_budget() -> None:
-    model = FakeModelAdapter(
-        [
-            AssistantTurn(
-                content=json.dumps(
-                    {
-                        "context_summary": "Bounded rolling context.",
-                        "memory_action": "none",
-                        "memory_summary": None,
-                    }
-                )
-            )
-        ]
-    )
-    maintainer = ModelTurnMemoryMaintainer(
-        model=model,
-        transcript_input_chars=20_000,
-        request_input_budget_chars=1_800,
-    )
-    messages = (
-        Message(role=MessageRole.USER, content="large transcript " + "x" * 20_000),
-    )
-
-    decision = maintainer.maintain(
-        task="Keep the request bounded",
-        result=_result(messages=messages),
-        turn_messages=messages,
-        previous_context="previous " + "y" * 10_000,
-        model_step=4,
-    )
-
-    assert decision.context_summary == "Bounded rolling context."
-    assert conversation_char_count(model.requests[0].messages) <= 1_800
-
-
-def test_maintainer_uses_fallback_when_fixed_prompt_cannot_fit() -> None:
+def test_maintainer_skips_call_instead_of_truncating_existing_memory() -> None:
     model = FakeModelAdapter([])
     observed = MemoryEventSink()
-    maintainer = ModelTurnMemoryMaintainer(
+    existing = (_record(1, "x" * 2_000),)
+    maintainer = ModelLongTermMemoryMaintainer(
         model=model,
-        events=EventBus((observed,), run_id="maintenance-budget-fallback"),
-        request_input_budget_chars=10,
+        events=EventBus((observed,), run_id="memory-budget"),
+        request_input_budget_chars=500,
     )
 
     decision = maintainer.maintain(
-        task="Remember unfinished work",
-        result=_result(phase=AgentPhase.FAILED),
+        task="Do not lose old memory",
+        result=_result(),
         turn_messages=(),
-        previous_context="Work is still unfinished.",
-        model_step=40,
+        project_memory=existing,
+        model_step=1,
     )
 
+    assert decision.memory_summary is None
     assert decision.used_fallback is True
-    assert "unfinished" in decision.context_summary
     assert model.requests == []
-    assert observed.events[-1].kind is AgentEventKind.MEMORY_SUMMARY_FAILED
-    assert (
-        observed.events[-1].details["reason"]
-        == "maintenance_request_budget_too_small"
+    assert observed.events[-1].details["reason"] == (
+        "memory_request_budget_too_small_for_all_records"
     )

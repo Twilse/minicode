@@ -1,279 +1,87 @@
 # MiniCoder
 
-MiniCoder is a command-line coding agent implemented from first principles for a software engineering assessment.
+MiniCoder 是本地命令行编程 Agent。模型负责决策，文件、搜索、命令和验证由本机在指定工作区执行，支持具备 Tool Calling 的 OpenAI-compatible Chat Completions 服务。
 
-The project is currently being developed in small, test-backed increments. Do not place a real API key in this repository.
+## 新机器运行
 
-## Current capabilities
+需要 Python 3.11 以上版本。`pyproject.toml` 能安装项目依赖，但不能安装 Python 本身。
 
-MiniCoder provides a synchronous multi-turn model/tool loop, workspace-scoped
-file tools, cross-platform command execution, bounded diagnostic output,
-context compaction, an explicit plan-before-execution phase,
-verification-before-completion, project memory, explicit states, and
-sanitized Observer events for the console and optional JSONL traces. Each
-process also keeps an exact private session archive, restores the latest
-same-workspace context on restart, and uses the configured model for semantic
-context maintenance.
+HTTPS: `https://github.com/Twilse/minicode.git`
 
-Configure any OpenAI-compatible Chat Completions endpoint with tool calling:
+SSH: `git@github.com:Twilse/minicode.git`
 
 ```bash
-export MINICODER_API_KEY="your-key"
-export MINICODER_BASE_URL="https://api.deepseek.com"
-export MINICODER_MODEL="deepseek-v4-pro"
+git clone https://github.com/Twilse/minicode.git
+cd minicode
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+
+export MINICODER_API_KEY="你的Key"
+export MINICODER_BASE_URL="服务商API地址"
+export MINICODER_MODEL="模型ID"
+
 python -m minicoder --check-config --workspace .
+
+cd /path/to/project
+minicoder
 ```
 
-Start an interactive session and keep the same conversation and tool artifacts
-until `/exit`, `/quit`, end-of-input, or Ctrl-C:
+`minicoder` 默认使用当前目录；激活虚拟环境后，进入目标项目直接运行即可。一次性任务可执行 `minicoder --workspace . "检查并测试项目"`。交互模式输入 `/exit` 或 `/quit` 退出；测试使用 `python -m pytest`。不要提交 API Key。
 
-```bash
-minicoder --workspace .
+## 记忆机制
+
+内存保存当前进程完整的 User、Assistant 和 Tool 消息。Session Archive 将任务、模型请求与回复、工具结果和终态追加到 `~/.minicoder/sessions/`；同工作区重启会恢复最近完整或中断的历史。它可能含源码和秘密，不是脱敏 Trace。
+
+长期事实写入 `~/.minicoder/memory/`。开启时每轮结束进行一次无工具判断，模型只能返回 `append` 或 `none`；仅稳定、重要、有证据且不重复的事实可追加，默认不记，判断失败也不创建。全部有效记忆随以后请求放入 System。
+
+每次请求由系统指令、全部长期记忆、预算内历史和本轮输入组成；Archive 恢复内容只作为历史 Messages，不回放 System，避免重复。
+
+上下文未超限时发送完整历史；超限后总结较早完整协议组，当前输入和最新工具结果保持原文。首次压到预算约 70%，以后总结“旧摘要＋新增旧记录”；原文仍留在 Archive，不重复送入模型。
+
+## 状态机、循环与计划
+
+主循环为：输入 → 无工具规划 → 模型与工具循环 → 验证 → 完成。`AgentStateMachine` 限制各阶段迁移，计划确认前不能执行工具。
+
+Planning 默认开启。首次请求使用 `tools=()`，只能生成 1～5 项计划；解析后 `PlanProgress` 启动第 1 项。执行请求增加 `finish_plan_step(step, summary)`，Schema 只允许当前编号；宿主再检查单独调用、完整参数、编号和 600 字符内的非空摘要。错误返回 ToolResult 且不推进，合法调用只能从 N 到 N+1。
+
+普通工具不推进计划，程序也不猜测其所属步骤。模型返回 ToolCall 就执行并继续；无 ToolCall 但计划或验证未通过则加入纠正消息。最终回答被接受才进入 `COMPLETE`；达到调用上限、不可恢复错误、验证无法支持或用户中断时进入 `FAILED` 并终止。
+
+## 工具调用
+
+`ToolRegistry` 注册八个工具：`list_files、read_file、search_text、create_file、write_file、replace_text、run_command、read_tool_output`，冻结定义并校验 JSON Schema，再执行 Tool 并关联 call ID 返回结果。路径不能越界；argv 命令拒绝提权、递归删除和破坏性 Git。长输出保存为 artifact，模型先看预览再分段读取。
+
+## 模型输出解析
+
+Adapter 检查模型的 choice、正文、ToolCall 和 reasoning，转换为 `AssistantTurn` 并清除内部标记。Engine 分流后，计划由 `PlanProgress` 解析，工具参数经 JSON 和 Schema 校验，无工具正文通过门禁才成为最终回答。`finish_plan_step` 独立解析；摘要须非空，长期记忆须为严格 JSON；非法输出不会执行。
+
+## 架构与设计模式
+
+```text
+用户 → CLI（驱动适配器）
+          ↓
+AgentEngine + Domain（应用核心）
+          ↓ 只依赖 Protocol 端口
+ModelPort / ProcessPort / EventSinkPort / ProjectMemoryPort / SessionArchivePort / ToolPort
+          ↑
+OpenAI 兼容模型 / POSIX或Windows / Console / JSONL / ToolRegistry
 ```
 
-The original one-shot form remains available:
+六边形架构中，`domain` 保存领域状态，`application` 编排 Agent 并定义 Ports，`adapters` 对接外部服务，`tools` 实现本地能力，`bootstrap.py` 统一装配。
 
-```bash
-python -m minicoder --workspace . "inspect this project and run its tests"
-```
+Factory 创建对象图；Adapter 隔离 SDK 和系统；Strategy 替换重试、压缩与摘要算法；Observer 向 Console/Trace 发布事件；Registry/Command 分派工具；依赖注入支持 Fake 测试。
 
-Append a sanitized audit trace whose parent directory already exists:
+## 自定义验证
 
-```bash
-python -m minicoder \
-  --workspace . \
-  --trace ./minicoder-trace.jsonl \
-  "inspect this project and run its tests"
-```
-
-The trace records event order, model steps, tool names, call IDs, status, error
-codes, and character counts. It intentionally excludes API keys, user task text,
-displayed plan text, displayed paths and commands, tool argument/output bodies,
-final response bodies, and model reasoning content.
-
-Each new interactive user turn receives a fresh model-step allowance while prior
-messages and completion evidence remain available to the session.
-
-The default allowance is 40 task-model requests per user turn. It includes the
-planning request and every model continuation after a tool result. The one
-post-turn maintenance request and any model-assisted context-compaction request
-are separate housekeeping calls and do not consume this task loop allowance.
-Override the task allowance for a smaller or larger task budget:
-
-```bash
-export MINICODER_MAX_STEPS=60
-```
-
-## Context budget
-
-MiniCoder uses an approximate character budget to keep each execution request
-below the configured model's context window. The default is 180,000 characters.
-The estimate now includes messages, the current Tool Registry JSON Schemas, and
-space reserved for the next model response. This value remains provider-neutral:
-it is not an exact token count or a claim about every compatible model's maximum.
-
-Override it when the selected endpoint has a smaller or larger context window:
-
-```bash
-export MINICODER_CONTEXT_BUDGET_CHARS=300000
-```
-
-The default response reserve is 8,000 characters (or 10% for an explicitly
-small context budget). It can be overridden, but must remain below the total:
-
-```bash
-export MINICODER_CONTEXT_RESPONSE_RESERVE_CHARS=12000
-```
-
-Every completed or failed external user turn is finalized by one no-tool
-maintenance pass that updates a structured rolling session summary. On later task-model
-requests, MiniCoder pins that model-written summary, the latest same-workspace
-session recovery data, and bounded durable project memory alongside the System
-message as quoted data. The current user request and current workspace evidence
-always take priority.
-
-When older raw protocol groups still need to be omitted, production composition
-uses another no-tool model request to summarize those groups semantically. The
-summary preserves requirements, files, tool outcomes, errors, verification and
-pending work while excluding private reasoning. A model failure falls back to
-the deterministic summary strategy. The complete source conversation remains in
-the private session archive either way. If fixed fields alone exceed the budget,
-MiniCoder does not send an oversized request and reports actionable configuration
-guidance. Maintenance and context-compaction calls use the same input-budget
-preflight; if even their fixed prompt cannot fit an unusually small custom
-budget, MiniCoder records a deterministic recovery checkpoint without sending
-that housekeeping request.
-
-## Planning before execution
-
-Planning is enabled by default. At the start of every user turn, the first model
-request cannot call tools and may only return a concise numbered action plan. It
-receives a bounded capability catalog containing current Registry names and
-descriptions, while the execution requests receive the complete current JSON
-Schemas through the API's separate `tools` field. Plan size follows task
-complexity: a direct answer should use one item, read-only inspection two or
-three, and code changes three to seven.
-MiniCoder then adds an execution instruction and makes the tools available.
-The system prompt tells the model to follow that plan unless file contents, tool
-results, errors, or safety rules provide a concrete reason to adapt it. The plan
-remains in normal conversation history and its model request counts toward
-`MINICODER_MAX_STEPS`.
-
-The console prints the bounded plan items and emits ordered “started” and
-“completed” transitions while tools move through the plan. Progress is associated
-with deterministic tool-activity facts: operation type, target path or query, and
-verification command. Source edits, test edits, documentation updates, and
-verification can therefore advance different plan items even when the provider
-omits tool-call content.
-
-Model-supplied step numbers are treated as hints and are accepted only when their
-plan item is compatible with the actual tool action. Tool-using plan items must
-run in order: if a call targets a later item before the current or next required
-item has observable work, MiniCoder does not execute it and returns a correlated
-`PLAN_STEP_OUT_OF_ORDER` result to the model. The model can then perform the
-missing item and retry. If a reliable association is unavailable at finalization,
-MiniCoder reports the item as not individually tracked; it never fabricates
-instantaneous start/completion events.
-
-Compatible models may attach `[plan_step=N]` to a tool-calling response for an
-exact association. This is reserved host metadata: the application decodes it
-immediately after the Model Port returns and removes it before conversation
-history or final user-visible text is created. When a provider omits tool-call
-content, the deterministic activity mapping remains available.
-
-`replace_text` supports either one `old_text`/`new_text` pair or an atomic
-`replacements` batch of up to 20 related exact edits to the same file. A batch is
-validated completely in memory and written once; one missing, repeated, or
-no-op match rejects the whole batch without partially changing the file. This
-reduces model round trips for files with several independent edit locations.
-
-Planning can be disabled for providers or small models that do not handle this
-two-phase interaction well:
-
-```bash
-export MINICODER_PLANNING_ENABLED=false
-```
-
-## Exact sessions and cross-process short-term context
-
-Exact session archiving is enabled by default. Disable it for a workspace whose
-raw requests and responses must never be persisted:
-
-```bash
-export MINICODER_SESSION_ARCHIVE_ENABLED=false
-```
-
-Each MiniCoder process owns one append-only file at
-`~/.minicoder/sessions/<workspace-hash>/<timestamp>-<session-id>.jsonl`. Records include the
-exact external user task, every normalized model request, the current tool
-schemas advertised with that request, every normalized model response, complete
-model-visible ToolResults and host metadata, terminal success or failure, and
-the post-turn maintenance decision. Records are flushed as work proceeds and
-the directory/file modes are restricted to the current operating-system user
-where supported.
-
-The next process started with the same canonical workspace path always loads the
-latest usable session, regardless of whether the new prompt says “continue”. It
-injects the previous task, complete/failed/in-progress state, stop reason,
-model-maintained rolling summary, and a bounded tail of visible messages and
-tool exchanges. This recovered text is explicitly labeled as historical data,
-not as a new instruction. A normal `/exit`, `/quit`, EOF or context-manager close
-adds a session-close record; if the process was interrupted earlier, the next
-startup builds a deterministic recovery checkpoint from the records already
-flushed.
-
-The archive is intentionally exact and may therefore contain source text,
-commands, outputs, model reasoning exposed by a provider, or secrets that were
-present in the conversation. It is separate from the sanitized `--trace` file.
-There is currently no rotation because this design prioritizes complete local
-recoverability; remove or disable archives explicitly for sensitive workspaces.
-
-## Selective project long-term memory
-
-Project memory is enabled by default. Disable it for a sensitive workspace or
-when the extra summary-model request is not wanted:
-
-```bash
-export MINICODER_MEMORY_ENABLED=false
-```
-
-At the end of every successful or failed external turn, the same no-tool
-maintenance request that updates rolling context must return either
-`memory_action=none` or `memory_action=append`. It appends only a stable,
-important, non-duplicate project fact that should survive beyond the latest
-session; transient conversation and ordinary answers remain only in the exact
-archive and rolling context. Model errors produce a deterministic recovery
-summary but never create a guessed durable memory.
-
-Selected records are redacted for the configured API key, stored outside the
-project at `~/.minicoder/memory/<workspace-hash>.jsonl`, and supplied on every
-task-model request within a bounded section. A memory read or write failure is a
-warning and never changes the task result. Disabling `MINICODER_MEMORY_ENABLED`
-prevents durable appends but does not disable exact session recovery or the
-rolling-context maintenance needed by that feature.
-
-The workspace path remains the project identity: moving the project starts new
-session and memory locations. The current stores intentionally have no automatic
-rotation, cross-process file locking, or `/forget` command.
-
-## Terminal experience
-
-On a real terminal, interactive input uses Python's editable `input()` path and
-loads `readline` where the platform provides it. This gives committed Unicode
-text character-aware Backspace handling and normal line history instead of
-editing raw UTF-8 bytes. Injected streams keep a deterministic plain line reader
-for tests and redirected input.
-
-The default console shows user-facing Chinese progress and the exact tool name,
-target path, search query, or bounded command needed to understand each action.
-It never displays create/replace text bodies or internal call IDs, and common
-API-key, token, password, authorization, credential, and secret command arguments
-are redacted. Successful completion noise, message counts, and provider exception
-class names remain omitted. Tool failures and terminal CLI failures use concise
-Chinese explanations with actionable guidance. The optional JSONL trace retains
-only the sanitized technical event fields for diagnosis.
-
-Final model responses are rendered as Markdown with Rich, including headings,
-lists, inline emphasis, and syntax-highlighted fenced code blocks. Valid fence
-markers such as three backticks are interpreted rather than printed literally.
-
-## Verification before completion
-
-After a successful `create_file` or `replace_text`, MiniCoder accepts the final
-response only after a relevant command succeeds. Built-in recognition covers
-common Python checks, npm/pnpm/yarn scripts, Go, Cargo, .NET, Maven, Gradle,
-Make, C and C++ compilers, CMake builds, CTest, and Ninja. For example, one
-recognition rule covers any `g++` compilation containing a C or C++ source file;
-individual source filenames do not need to be registered.
-
-The model marks commands intended as evidence with
-`purpose="verification"`. That declaration makes the intent explicit but does
-not turn an arbitrary successful command such as `echo done` into proof. If a
-toolchain is not built in, configure one stable whole-project verifier rather
-than one command per source file:
+内置规则未覆盖时，在工作区创建并人工检查 `.minicoder.toml`：
 
 ```toml
-# .minicoder.toml
 [verification]
-commands = [
-  ["zig", "build", "test"],
-  ["python", "scripts/verify_project.py"],
-]
+commands = [["zig", "build", "test"], ["python", "scripts/verify.py"]]
 ```
 
-Each entry is an exact argv alternative, not shell text: pipes, redirection,
-globs, and `&&` are not expanded. MiniCoder reads and validates this file once
-at startup, then keeps an immutable snapshot for the session. This prevents an
-in-session file edit from authorizing a new verifier. Review configuration
-changes and restart MiniCoder to load them. `--check-config` reports only the
-number of configured commands, not their contents.
+每项按完整 argv 精确匹配，最多 20 项；修改后重启加载。模型声明 `purpose="verification"` 不能自行授权其他命令。
 
-When a successful command is marked for verification but is neither built in
-nor present in the startup snapshot, MiniCoder gives the model one correction
-opportunity and suggests recognized checks such as `python -m py_compile` or
-`python -m pytest`. A direct application run such as `python app.py` remains a
-general command because an application can hide a failed check and still exit
-successfully. If the model proposes completion again without obtaining
-recognized evidence for the same edit, the task ends with
-`verification_unsupported` and configuration guidance instead of consuming the
-remaining model-step budget.
+## 错误与重试
+
+连接失败、限流和服务端 5xx 重试两次，等待 0.5 秒和 1 秒，且不增加模型步骤。无效 Key、权限、其他 4xx 和协议错误不重试。工具或命令错误转成 ToolResult 交给模型纠正；摘要失败使用后备，记忆或事件失败只告警。

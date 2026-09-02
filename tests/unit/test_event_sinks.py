@@ -181,34 +181,16 @@ def test_console_sink_shows_command_and_chinese_failure_reason() -> None:
     ]
 
 
-def test_console_sink_explains_an_out_of_order_tool_without_claiming_execution() -> None:
-    output = StringIO()
-    bus = EventBus((ConsoleEventSink(output),), run_id="run-plan-order")
-
-    bus.publish(
-        AgentEventKind.PLAN_TOOL_REJECTED,
-        model_step=3,
-        details={
-            "call_id": "call-too-early",
-            "tool_name": "replace_text",
-            "expected_plan_step": 2,
-            "attempted_plan_step": 4,
-            "plan_item_count": 6,
-            "display_path": "README.md",
-        },
-    )
-
-    assert output.getvalue().splitlines() == [
-        "[顺序] 暂未执行 replace_text：当前应先处理计划 2/6，该操作更符合 4/6"
-    ]
-    assert "call-too-early" not in output.getvalue()
-
-
 def test_console_sink_renders_planning_and_memory_as_optional_progress() -> None:
     output = StringIO()
     bus = EventBus((ConsoleEventSink(output),), run_id="run-plan-memory")
 
     bus.publish(AgentEventKind.PLANNING_STARTED, model_step=0)
+    bus.publish(
+        AgentEventKind.PLANNING_RETRY_REQUESTED,
+        model_step=1,
+        details={"attempt": 1, "maximum": 2},
+    )
     bus.publish(
         AgentEventKind.MODEL_REQUESTED,
         model_step=1,
@@ -241,12 +223,10 @@ def test_console_sink_renders_planning_and_memory_as_optional_progress() -> None
         },
     )
     bus.publish(
-        AgentEventKind.PLAN_STEPS_UNTRACKED,
+        AgentEventKind.PLAN_STEP_REPORT_REQUIRED,
         model_step=2,
         details={
-            "first_plan_step": 2,
-            "last_plan_step": 2,
-            "untracked_plan_item_count": 1,
+            "plan_step": 2,
             "plan_item_count": 2,
         },
     )
@@ -255,7 +235,6 @@ def test_console_sink_renders_planning_and_memory_as_optional_progress() -> None
         model_step=2,
         details={
             "plan_item_count": 2,
-            "untracked_plan_item_count": 1,
         },
     )
     bus.publish(
@@ -274,15 +253,16 @@ def test_console_sink_renders_planning_and_memory_as_optional_progress() -> None
 
     assert output.getvalue().splitlines() == [
         "[计划] 正在制定本轮执行计划…",
+        "[计划] 返回格式无法识别，正在要求模型重新生成（第 1/2 次重试）…",
         "[计划] 已生成，共 2 项：",
         "  1. 检查项目",
         "  2. 输出结果",
         "[进行中] 1/2 检查项目",
         "[已完成] 1/2 检查项目",
-        "[未关联] 计划 2/2 没有对应到独立的工具操作；不推测其具体完成时间",
-        "[计划] 任务已完成，计划进度结束（共 2 项，1 项未单独关联工具操作）",
-        "[长期记忆] 已加载这个项目最近的 3 条记录",
-        "[记忆] 正在更新会话摘要并判断是否记录长期记忆…",
+        "[计划] 模型尚未确认第 2/2 项完成，继续处理当前项",
+        "[计划] 全部 2 项已完成",
+        "[长期记忆] 已加载这个项目全部 3 条有效记录",
+        "[长期记忆] 正在严格判断本轮是否产生了真正有价值的新记忆…",
         "[长期记忆] 已记录一条以后仍有价值的项目信息",
         "[记忆] 本地记忆文件不可用；本次任务结果不受影响",
     ]
@@ -298,7 +278,7 @@ def test_console_sink_distinguishes_short_term_restore_and_model_compaction() ->
         details={
             "previous_status": "failed",
             "previous_stop_reason": "max_steps",
-            "recent_message_count": 8,
+            "restored_message_count": 8,
         },
     )
     bus.publish(
@@ -318,10 +298,37 @@ def test_console_sink_distinguishes_short_term_restore_and_model_compaction() ->
     )
 
     assert output.getvalue().splitlines() == [
-        "[短期记忆] 已恢复同一工作区最近一次会话（状态：failed）",
+        "[上下文] 已从最近的会话档案恢复连续对话上下文（状态：failed）",
         "[上下文] 正在让模型压缩较早的对话内容…",
         "[上下文] 模型压缩未成功，已使用基础压缩结果",
         "[短期记忆] 完整会话档案暂时不可用；本次任务仍继续",
+    ]
+
+
+def test_console_sink_can_defer_recovery_messages_until_history_is_replayed() -> None:
+    output = StringIO()
+    sink = ConsoleEventSink(output, defer_recovery_messages=True)
+    bus = EventBus((sink,), run_id="run-deferred-recovery")
+
+    bus.publish(
+        AgentEventKind.SESSION_CONTEXT_LOADED,
+        model_step=0,
+        details={"previous_status": "complete"},
+    )
+    bus.publish(
+        AgentEventKind.MEMORY_LOADED,
+        model_step=0,
+        details={"record_count": 2},
+    )
+
+    assert output.getvalue() == ""
+
+    sink.flush_recovery_messages()
+    sink.flush_recovery_messages()
+
+    assert output.getvalue().splitlines() == [
+        "[上下文] 已从最近的会话档案恢复连续对话上下文（状态：complete）",
+        "[长期记忆] 已加载这个项目全部 2 条有效记录",
     ]
 
 

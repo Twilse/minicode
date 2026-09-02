@@ -27,6 +27,7 @@ _TOOL_ACTIONS = {
     "read_file": "读取文件",
     "search_text": "搜索代码",
     "create_file": "创建文件",
+    "write_file": "写入文件",
     "replace_text": "修改文件",
     "run_command": "运行命令",
     "read_tool_output": "读取完整命令输出",
@@ -50,6 +51,7 @@ _TOOL_ERROR_MESSAGES = {
     "PATH_OUTSIDE_WORKSPACE": "路径超出了允许访问的工作目录",
     "BINARY_FILE": "目标文件不是可处理的 UTF-8 文本文件",
     "FILE_ALREADY_EXISTS": "目标文件已经存在",
+    "FILE_CONTENT_MISMATCH": "文件内容已经变化，请重新读取后再写入",
     "FILE_IO_ERROR": "读写文件时发生系统错误",
     "FILE_NOT_FOUND": "目标文件或目录不存在",
     "FILE_TOO_LARGE": "目标文件超过了允许处理的大小",
@@ -79,13 +81,34 @@ _REQUIRED_ENV_ERROR = re.compile(r"^(MINICODER_[A-Z0-9_]+) is required$")
 class ConsoleEventSink:
     """Render concise user-facing progress without internal protocol details."""
 
-    def __init__(self, output: TextIO | None = None) -> None:
+    def __init__(
+        self,
+        output: TextIO | None = None,
+        *,
+        defer_recovery_messages: bool = False,
+    ) -> None:
         self._output = sys.stdout if output is None else output
+        self._defer_recovery_messages = defer_recovery_messages
+        self._deferred_recovery_messages: list[str] = []
 
     def handle(self, event: AgentEvent) -> None:
         message = _format_event(event)
-        if message is not None:
+        if message is None:
+            return
+        if self._defer_recovery_messages and event.kind in {
+            AgentEventKind.SESSION_CONTEXT_LOADED,
+            AgentEventKind.MEMORY_LOADED,
+        }:
+            self._deferred_recovery_messages.append(message)
+            return
+        print(message, file=self._output, flush=True)
+
+    def flush_recovery_messages(self) -> None:
+        """Print deferred startup recovery details after dialogue replay."""
+
+        for message in self._deferred_recovery_messages:
             print(message, file=self._output, flush=True)
+        self._deferred_recovery_messages.clear()
 
 
 def _format_event(event: AgentEvent) -> str | None:
@@ -97,6 +120,13 @@ def _format_event(event: AgentEvent) -> str | None:
         )
     if event.kind is AgentEventKind.PLANNING_STARTED:
         return "[计划] 正在制定本轮执行计划…"
+    if event.kind is AgentEventKind.PLANNING_RETRY_REQUESTED:
+        attempt = int(details["attempt"])
+        maximum = int(details["maximum"])
+        return (
+            "[计划] 返回格式无法识别，正在要求模型重新生成"
+            f"（第 {attempt}/{maximum} 次重试）…"
+        )
     if event.kind is AgentEventKind.PLANNING_COMPLETED:
         count = int(details.get("plan_item_count", 0))
         plan = str(details.get("display_plan", "")).strip()
@@ -114,32 +144,15 @@ def _format_event(event: AgentEvent) -> str | None:
         count = int(details["plan_item_count"])
         step = str(details.get("display_plan_step", "当前步骤"))
         return f"[已完成] {index}/{count} {step}"
-    if event.kind is AgentEventKind.PLAN_STEPS_UNTRACKED:
-        first = int(details["first_plan_step"])
-        last = int(details["last_plan_step"])
+    if event.kind is AgentEventKind.PLAN_STEP_REPORT_REQUIRED:
+        index = int(details["plan_step"])
         count = int(details["plan_item_count"])
-        label = str(first) if first == last else f"{first}–{last}"
         return (
-            f"[未关联] 计划 {label}/{count} 没有对应到独立的工具操作；"
-            "不推测其具体完成时间"
-        )
-    if event.kind is AgentEventKind.PLAN_TOOL_REJECTED:
-        expected = int(details["expected_plan_step"])
-        attempted = int(details["attempted_plan_step"])
-        count = int(details["plan_item_count"])
-        tool_name = str(details["tool_name"])
-        return (
-            f"[顺序] 暂未执行 {tool_name}：当前应先处理计划 "
-            f"{expected}/{count}，该操作更符合 {attempted}/{count}"
+            f"[计划] 模型尚未确认第 {index}/{count} 项完成，"
+            "继续处理当前项"
         )
     if event.kind is AgentEventKind.PLAN_COMPLETED:
         count = int(details["plan_item_count"])
-        untracked = int(details.get("untracked_plan_item_count", 0))
-        if untracked:
-            return (
-                f"[计划] 任务已完成，计划进度结束（共 {count} 项，"
-                f"{untracked} 项未单独关联工具操作）"
-            )
         return f"[计划] 全部 {count} 项已完成"
     if event.kind is AgentEventKind.MODEL_REQUESTED:
         if details.get("request_kind") == "planning":
@@ -147,16 +160,16 @@ def _format_event(event: AgentEvent) -> str | None:
         return f"[分析] 正在请求模型（第 {event.model_step} 次）"
     if event.kind is AgentEventKind.MEMORY_LOADED:
         count = int(details.get("record_count", 0))
-        return f"[长期记忆] 已加载这个项目最近的 {count} 条记录"
+        return f"[长期记忆] 已加载这个项目全部 {count} 条有效记录"
     if event.kind is AgentEventKind.SESSION_CONTEXT_LOADED:
         status = str(details.get("previous_status", "unknown"))
-        return f"[短期记忆] 已恢复同一工作区最近一次会话（状态：{status}）"
+        return f"[上下文] 已从最近的会话档案恢复连续对话上下文（状态：{status}）"
     if event.kind is AgentEventKind.MEMORY_SUMMARY_REQUESTED:
-        return "[记忆] 正在更新会话摘要并判断是否记录长期记忆…"
+        return "[长期记忆] 正在严格判断本轮是否产生了真正有价值的新记忆…"
     if event.kind is AgentEventKind.MEMORY_SUMMARY_COMPLETED:
         return None
     if event.kind is AgentEventKind.MEMORY_SUMMARY_FAILED:
-        return "[记忆] 维护模型未成功，已保存基础恢复检查点"
+        return "[长期记忆] 本轮未新增记录；完整会话仍已保存在本地档案中"
     if event.kind is AgentEventKind.MEMORY_SAVED:
         return "[长期记忆] 已记录一条以后仍有价值的项目信息"
     if event.kind is AgentEventKind.MEMORY_OPERATION_FAILED:
@@ -215,6 +228,8 @@ def _tool_call_message(event: AgentEvent) -> str:
             return f"[操作] 使用 search_text 在 {location} 中搜索：{query!r}"
     if tool_name == "create_file" and path:
         return f"[操作] 使用 create_file 创建文件：{path}"
+    if tool_name == "write_file" and path:
+        return f"[操作] 使用 write_file 写入文件：{path}"
     if tool_name == "replace_text" and path:
         return f"[操作] 使用 replace_text 修改文件：{path}"
     if tool_name == "run_command":

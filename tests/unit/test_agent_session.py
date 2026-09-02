@@ -6,7 +6,7 @@ from minicoder.application.agent_engine import AgentEngine
 from minicoder.application.event_bus import EventBus
 from minicoder.domain.errors import MemoryPersistenceError, ModelConnectionError
 from minicoder.domain.events import AgentEvent, AgentEventKind
-from minicoder.domain.memory import ProjectMemoryRecord, TurnMaintenanceDecision
+from minicoder.domain.memory import LongTermMemoryDecision, ProjectMemoryRecord
 from minicoder.bootstrap import AgentSession
 from minicoder.domain.models import AssistantTurn
 from minicoder.domain.state import AgentPhase
@@ -137,7 +137,7 @@ def test_session_keeps_completed_result_when_memory_append_fails(
     tmp_path: Path,
 ) -> None:
     class FailingMemoryStore:
-        def load_recent(self) -> tuple[ProjectMemoryRecord, ...]:
+        def load_all(self) -> tuple[ProjectMemoryRecord, ...]:
             return ()
 
         def append(self, record: ProjectMemoryRecord) -> None:
@@ -150,13 +150,11 @@ def test_session_keeps_completed_result_when_memory_append_fails(
             task: str,
             result: object,
             turn_messages: object,
-            previous_context: str | None,
             model_step: int,
             project_memory: object = (),
             turn_index: int = 1,
-        ) -> TurnMaintenanceDecision:
-            return TurnMaintenanceDecision(
-                context_summary="Completed the requested work.",
+        ) -> LongTermMemoryDecision:
+            return LongTermMemoryDecision(
                 memory_summary="Durable completed work.",
             )
 
@@ -195,7 +193,7 @@ def test_session_maintains_failed_turn_without_forcing_durable_memory(
             raise ModelConnectionError("offline")
 
     class RecordingMemoryStore:
-        def load_recent(self) -> tuple[ProjectMemoryRecord, ...]:
+        def load_all(self) -> tuple[ProjectMemoryRecord, ...]:
             return ()
 
         def append(self, record: ProjectMemoryRecord) -> None:
@@ -205,14 +203,9 @@ def test_session_maintains_failed_turn_without_forcing_durable_memory(
         def __init__(self) -> None:
             self.results: list[object] = []
 
-        def maintain(self, **kwargs: object) -> TurnMaintenanceDecision:
+        def maintain(self, **kwargs: object) -> LongTermMemoryDecision:
             self.results.append(kwargs["result"])
-            return TurnMaintenanceDecision(
-                context_summary=(
-                    "The last turn failed because the model service was offline."
-                ),
-                memory_summary=None,
-            )
+            return LongTermMemoryDecision(memory_summary=None)
 
     artifacts = ToolOutputArtifactStore(
         max_read_chars=100,
@@ -238,4 +231,4 @@ def test_session_maintains_failed_turn_without_forcing_durable_memory(
 
     assert result.phase is AgentPhase.FAILED
     assert maintainer.results == [result]
-    assert "model service was offline" in session.rolling_context
+    assert session.history == result.messages

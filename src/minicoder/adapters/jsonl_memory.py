@@ -1,10 +1,9 @@
-"""Workspace-scoped JSON Lines persistence for bounded project memories."""
+"""Workspace-scoped JSON Lines persistence for durable project memories."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections import deque
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,12 +13,11 @@ from minicoder.domain.errors import MemoryPersistenceError
 from minicoder.domain.memory import ProjectMemoryRecord
 
 MEMORY_SCHEMA_VERSION = 1
-DEFAULT_MAX_RECORDS = 8
 DEFAULT_MAX_SUMMARY_CHARS = 1_200
 
 
 class JsonlProjectMemoryStore:
-    """Persist recent semantic summaries outside the inspected workspace."""
+    """Persist semantic summaries outside the inspected workspace."""
 
     def __init__(
         self,
@@ -27,13 +25,8 @@ class JsonlProjectMemoryStore:
         workspace: str | Path,
         storage_root: str | Path | None = None,
         sensitive_values: Sequence[str] = (),
-        max_records: int = DEFAULT_MAX_RECORDS,
         max_summary_chars: int = DEFAULT_MAX_SUMMARY_CHARS,
     ) -> None:
-        if not isinstance(max_records, int) or isinstance(max_records, bool):
-            raise ValueError("memory max_records must be a positive integer")
-        if max_records <= 0:
-            raise ValueError("memory max_records must be a positive integer")
         if (
             not isinstance(max_summary_chars, int)
             or isinstance(max_summary_chars, bool)
@@ -73,20 +66,19 @@ class JsonlProjectMemoryStore:
         self._sensitive_values = tuple(
             value for value in sensitive_values if isinstance(value, str) and value
         )
-        self._max_records = max_records
         self._max_summary_chars = max_summary_chars
 
     @property
     def path(self) -> Path:
         return self._path
 
-    def load_recent(self) -> Sequence[ProjectMemoryRecord]:
-        """Load recent valid lines while ignoring independent corrupt records."""
+    def load_all(self) -> Sequence[ProjectMemoryRecord]:
+        """Load all valid lines while ignoring independent corrupt records."""
 
         if not self._path.exists():
             return ()
 
-        records: deque[ProjectMemoryRecord] = deque(maxlen=self._max_records)
+        records: list[ProjectMemoryRecord] = []
         try:
             with self._path.open("rb") as memory_file:
                 for raw_line in memory_file:

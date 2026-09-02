@@ -19,11 +19,11 @@ class AgentEventKind(str, Enum):
 
     TASK_STARTED = "task_started"
     PLANNING_STARTED = "planning_started"
+    PLANNING_RETRY_REQUESTED = "planning_retry_requested"
     PLANNING_COMPLETED = "planning_completed"
     PLAN_STEP_STARTED = "plan_step_started"
     PLAN_STEP_COMPLETED = "plan_step_completed"
-    PLAN_STEPS_UNTRACKED = "plan_steps_untracked"
-    PLAN_TOOL_REJECTED = "plan_tool_rejected"
+    PLAN_STEP_REPORT_REQUIRED = "plan_step_report_required"
     PLAN_COMPLETED = "plan_completed"
     MODEL_REQUESTED = "model_requested"
     MODEL_RETRY_SCHEDULED = "model_retry_scheduled"
